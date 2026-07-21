@@ -67,6 +67,7 @@ class Config:
     position_size_pct: float
     max_order_dollars: float
     lookback_days: int
+    risk_pct: float = 0.01  # % of buying power risked per trade (stop-loss based)
 
     # Derived / convenience fields.
     trading_url: str = field(init=False)
@@ -87,6 +88,8 @@ class Config:
             )
         if self.max_order_dollars <= 0:
             raise ConfigError("MAX_ORDER_DOLLARS must be positive.")
+        if not (0 < self.risk_pct <= 0.5):
+            raise ConfigError("RISK_PCT must be between 0 and 0.5.")
         if self.lookback_days < 2:
             raise ConfigError("LOOKBACK_DAYS must be at least 2.")
 
@@ -102,9 +105,10 @@ def load_config() -> Config:
         api_secret=os.getenv("ALPACA_API_SECRET", "").strip(),
         live=_get_bool("LIVE", default=False),
         position_size_pct=_get_float("POSITION_SIZE_PCT", default=0.05),
-        max_order_dollars=_get_float("MAX_ORDER_DOLLARS", default=1000.0),
+        max_order_dollars=_get_float("MAX_ORDER_DOLLARS", default=2000.0),
         # Enough daily bars for the 50-day SMA + MACD/RSI warmup.
         lookback_days=_get_int("LOOKBACK_DAYS", default=60),
+        risk_pct=_get_float("RISK_PCT", default=0.01),
     )
 
 

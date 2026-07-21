@@ -21,8 +21,12 @@ from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
 from alpaca.trading.client import TradingClient
-from alpaca.trading.enums import OrderSide, TimeInForce
-from alpaca.trading.requests import MarketOrderRequest
+from alpaca.trading.enums import OrderClass, OrderSide, TimeInForce
+from alpaca.trading.requests import (
+    MarketOrderRequest,
+    StopLossRequest,
+    TakeProfitRequest,
+)
 
 from config import Config
 from strategy import Bar
@@ -114,7 +118,13 @@ class Broker:
             # Keep only the most recent `lookback` bars.
             recent = sdk_bars[-lookback:]
             result[symbol] = [
-                Bar(close=float(b.close), volume=float(b.volume)) for b in recent
+                Bar(
+                    close=float(b.close),
+                    volume=float(b.volume),
+                    high=float(b.high),
+                    low=float(b.low),
+                )
+                for b in recent
             ]
         return result
 
@@ -135,6 +145,28 @@ class Broker:
             qty=qty,
             side=side,
             time_in_force=TimeInForce.DAY,
+        )
+        try:
+            return self.trading.submit_order(order_data=order_data)
+        except Exception as exc:  # noqa: BLE001
+            raise BrokerError(f"Order rejected by Alpaca: {exc}") from exc
+
+    def submit_bracket_order(
+        self, symbol: str, qty: int, take_profit: float, stop_loss: float
+    ) -> object:
+        """
+        Submit a BRACKET order: a market BUY entry that automatically attaches a
+        take-profit limit and a stop-loss. Once the entry fills, Alpaca manages
+        both exits for you (whichever hits first cancels the other).
+        """
+        order_data = MarketOrderRequest(
+            symbol=symbol,
+            qty=qty,
+            side=OrderSide.BUY,
+            time_in_force=TimeInForce.DAY,
+            order_class=OrderClass.BRACKET,
+            take_profit=TakeProfitRequest(limit_price=round(take_profit, 2)),
+            stop_loss=StopLossRequest(stop_price=round(stop_loss, 2)),
         )
         try:
             return self.trading.submit_order(order_data=order_data)

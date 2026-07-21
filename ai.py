@@ -94,7 +94,9 @@ def _build_messages(candidates: List[SymbolScore]) -> list:
         '  "symbol": one of the candidate tickers,\n'
         '  "recommendation": one of "GO", "CAUTION", "NO-GO",\n'
         '  "confidence": one of "low", "medium", "high",\n'
-        '  "rationale": one or two sentences a beginner can follow.'
+        '  "rationale": 2-3 sentences a beginner can follow — say WHY this stock '
+        "won over the others, referencing its trend, RSI, MACD and volume, and "
+        "what would make you cautious."
     )
     return [
         {"role": "system", "content": system},
@@ -131,8 +133,8 @@ def ai_choose(
     body = _post(api_key, {
         "model": model or GROQ_MODEL,
         "messages": _build_messages(candidates),
-        "temperature": 0.2,
-        "max_tokens": 400,
+        "temperature": 0.3,
+        "max_tokens": 700,
         "response_format": {"type": "json_object"},
     })
     if body is None:

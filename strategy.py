@@ -61,10 +61,14 @@ MIN_BARS = SMA_SLOW
 @dataclass
 class Bar:
     """A single daily OHLCV bar. Strategy code only depends on this shape,
-    not on Alpaca's SDK objects, which keeps it easy to unit-test."""
+    not on Alpaca's SDK objects, which keeps it easy to unit-test. `high`/`low`
+    are optional so tests can build a bar from just close+volume; when missing,
+    the ATR falls back to close-to-close moves."""
 
     close: float
     volume: float
+    high: Optional[float] = None
+    low: Optional[float] = None
 
 
 @dataclass
@@ -79,6 +83,7 @@ class SymbolScore:
     volume_ratio: float       # today's volume / average volume
     rsi: float                # 14-day RSI reading
     macd_hist: float          # MACD histogram (macd - signal); >0 is bullish
+    atr: float                # 14-day Average True Range (volatility, in $)
     reason: str               # human-readable explanation of the signal
 
 
@@ -121,6 +126,23 @@ def _macd_hist(closes: Sequence[float]) -> float:
     return macd_line[-1] - signal[-1]
 
 
+def _atr(bars: List[Bar], period: int = 14) -> float:
+    """Average True Range — how much the stock typically moves per day, in $.
+    Used to place a volatility-aware stop-loss. Uses high/low when available,
+    otherwise falls back to close-to-close moves."""
+    trs: List[float] = []
+    for i in range(1, len(bars)):
+        prev_close = bars[i - 1].close
+        high = bars[i].high if bars[i].high is not None else bars[i].close
+        low = bars[i].low if bars[i].low is not None else bars[i].close
+        tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+        trs.append(tr)
+    if not trs:
+        return 0.0
+    recent = trs[-period:]
+    return sum(recent) / len(recent)
+
+
 # --------------------------------------------------------------------- scoring
 def score_symbol(symbol: str, bars: List[Bar]) -> Optional[SymbolScore]:
     """
@@ -148,6 +170,7 @@ def score_symbol(symbol: str, bars: List[Bar]) -> Optional[SymbolScore]:
     volume_ratio = today_volume / avg_volume
     rsi = _rsi(closes)
     macd_hist = _macd_hist(closes)
+    atr = _atr(bars)
 
     # --- Filters: ALL must pass to be a candidate ---
     trend_up = last_price > sma_fast and sma_fast > sma_slow  # MA crossover uptrend
@@ -165,7 +188,8 @@ def score_symbol(symbol: str, bars: List[Bar]) -> Optional[SymbolScore]:
         f"{SMA_SLOW}-day SMA ${sma_slow:.2f}. "
         f"RSI {rsi:.0f} (momentum, not overbought). "
         f"MACD bullish (histogram {macd_hist:+.2f}). "
-        f"Volume {volume_ratio:.2f}x its {VOLUME_PERIOD}-day average."
+        f"Volume {volume_ratio:.2f}x its {VOLUME_PERIOD}-day average. "
+        f"Typical daily move (ATR) ${atr:.2f}."
     )
 
     return SymbolScore(
@@ -177,6 +201,7 @@ def score_symbol(symbol: str, bars: List[Bar]) -> Optional[SymbolScore]:
         volume_ratio=volume_ratio,
         rsi=rsi,
         macd_hist=macd_hist,
+        atr=atr,
         reason=reason,
     )
 

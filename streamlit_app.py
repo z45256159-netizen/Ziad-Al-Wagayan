@@ -15,12 +15,10 @@ from __future__ import annotations
 import os
 
 import streamlit as st
-from alpaca.trading.enums import OrderSide
-
 from ai import ai_choose, verify_key
 from broker import Broker, BrokerError
 from config import Config, ConfigError
-from sizing import size_position
+from sizing import build_trade_plan
 from strategy import rank_candidates
 from universe import UNIVERSE
 
@@ -33,6 +31,7 @@ ss.setdefault("pending", None)     # trade awaiting yes/no: {"c","s","ai"}
 ss.setdefault("broker", None)
 ss.setdefault("cfg", None)
 ss.setdefault("groq_key", "")
+ss.setdefault("recent", [])        # last few tickers suggested, for variety
 
 
 def _secret(name: str, default: str = "") -> str:
@@ -79,8 +78,9 @@ if not ss.connected:
                 api_secret=alp_sec.strip(),
                 live=live,
                 position_size_pct=float(_secret("POSITION_SIZE_PCT", "0.05")),
-                max_order_dollars=float(_secret("MAX_ORDER_DOLLARS", "1000")),
+                max_order_dollars=float(_secret("MAX_ORDER_DOLLARS", "2000")),
                 lookback_days=int(_secret("LOOKBACK_DAYS", "60")),
+                risk_pct=float(_secret("RISK_PCT", "0.01")),
             )
         except (ConfigError, ValueError) as exc:
             st.error(f"Check your entries: {exc}")
@@ -147,8 +147,8 @@ def build_trade():
 
     ranked = rank_candidates(bars)
     if not ranked:
-        return ("No stock passed the momentum + volume filters right now — "
-                "nothing worth trading. Try again later."), None
+        return ("No stock passed the trend + RSI + MACD + volume filters right "
+                "now — nothing worth trading. Try again later."), None
 
     try:
         held = broker.held_symbols()
@@ -159,12 +159,17 @@ def build_trade():
         return ("The best candidates are all already in your portfolio — "
                 "skipping to avoid doubling up."), None
 
-    candidate = tradeable[0]
+    # Variety: prefer candidates we haven't just suggested. If that empties the
+    # list, fall back to the full set.
+    fresh = [c for c in tradeable if c.symbol not in ss.recent]
+    pool = fresh if fresh else tradeable
+
+    candidate = pool[0]
     ai = None
     if ss.groq_key:
-        ai = ai_choose(tradeable[:6], ss.groq_key)
+        ai = ai_choose(pool[:6], ss.groq_key)
         if ai is not None:
-            match = next((c for c in tradeable if c.symbol == ai.symbol), None)
+            match = next((c for c in pool if c.symbol == ai.symbol), None)
             if match is not None:
                 candidate = match
 
@@ -173,42 +178,65 @@ def build_trade():
     except BrokerError as exc:
         return f"⚠️ Couldn't read your buying power: {exc}", None
 
-    sizing = size_position(
-        price=candidate.last_price,
+    plan = build_trade_plan(
+        score=candidate,
         buying_power=buying_power,
-        position_size_pct=cfg.position_size_pct,
+        risk_pct=cfg.risk_pct,
         max_order_dollars=cfg.max_order_dollars,
     )
 
-    # Build the message.
-    parts = [f"**Found: {candidate.symbol}** at ${candidate.last_price:,.2f}",
-             f"_{candidate.reason}_"]
+    # Remember this ticker so the next scan tends to pick something different.
+    ss.recent = ([candidate.symbol] + ss.recent)[:3]
+
+    # ---- Build the full, trader-style message ----
+    parts = [f"### 📊 {candidate.symbol} @ ${plan.entry:,.2f}"]
+    parts.append(f"**Why this stock:** {candidate.reason}")
+    parts.append("**Strategy:** moving-average crossover (20 vs 50) + RSI + MACD "
+                 "+ volume — a momentum setup that only fires when trend, "
+                 "momentum, confirmation and participation all agree.")
     if ai is not None:
         badge = {"GO": "🟢", "CAUTION": "🟡", "NO-GO": "🔴"}.get(ai.recommendation, "🤖")
-        parts.append(f"🤖 AI: {badge} **{ai.recommendation}** "
-                     f"({ai.confidence} confidence) — {ai.rationale}")
+        parts.append(f"🤖 **AI ({ai.confidence} confidence): {badge} "
+                     f"{ai.recommendation}** — {ai.rationale}")
     if market_open is False:
         parts.append("_Market is closed — the order will queue until it opens._")
 
-    if not sizing.ok:
-        parts.append(f"But I can't size an order: {sizing.skipped_reason}")
+    if not plan.ok:
+        parts.append(f"⚠️ Can't build an order: {plan.skipped_reason}")
         return "\n\n".join(parts), None
 
-    parts.append(f"**Proposed: BUY {sizing.qty} share(s) (~${sizing.estimated_cost:,.2f}).**")
-    parts.append("Place it? Tap **Yes** or **No** below (or type yes / no).")
-    pending = {"c": candidate, "s": sizing, "ai": ai}
-    return "\n\n".join(parts), pending
+    parts.append(
+        "**📋 Trade plan**\n"
+        f"- **Buy {plan.qty} share(s)** of {plan.symbol} at ~${plan.entry:,.2f}\n"
+        f"- 💵 Cost: **${plan.cost:,.2f}**\n"
+        f"- 🛑 Stop-loss: **${plan.stop:,.2f}** (−{plan.stop_pct:.1f}%) → "
+        f"risk **${plan.risk_total:,.2f}** if it hits\n"
+        f"- 🎯 Take-profit: **${plan.take_profit:,.2f}** (+{plan.tp_pct:.1f}%) → "
+        f"profit **${plan.reward_total:,.2f}** if it hits\n"
+        f"- ⚖️ Risk/reward: **1 : {plan.rr_ratio:g}**"
+    )
+    parts.append("Place it? Tap **✅ Yes** or **❌ No** below (or type yes / no). "
+                 "The stop-loss and take-profit are placed automatically with it.")
+    return "\n\n".join(parts), {"plan": plan, "ai": ai}
 
 
 def place_pending() -> None:
-    p = ss.pending
+    plan = ss.pending["plan"]
     ss.pending = None
-    c, s = p["c"], p["s"]
     try:
-        order = broker.submit_market_order(symbol=c.symbol, qty=s.qty, side=OrderSide.BUY)
+        order = broker.submit_bracket_order(
+            symbol=plan.symbol,
+            qty=plan.qty,
+            take_profit=plan.take_profit,
+            stop_loss=plan.stop,
+        )
         status = getattr(order.status, "value", order.status)
-        say("assistant", f"✅ Order placed! **{order.symbol} ×{order.qty}** — "
-                         f"status **{status}** (id `{order.id}`).")
+        say("assistant",
+            f"✅ Order placed! **{order.symbol} ×{order.qty}** at market — "
+            f"status **{status}**.\n\n"
+            f"🛑 Stop-loss ${plan.stop:,.2f} and 🎯 take-profit "
+            f"${plan.take_profit:,.2f} are attached automatically "
+            f"(id `{order.id}`).")
     except BrokerError as exc:
         say("assistant", f"❌ Order failed: {exc}")
 

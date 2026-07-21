@@ -3,10 +3,13 @@
 An interactive command-line trading bot for US stocks, built on the
 [Alpaca](https://alpaca.markets/) API using the official `alpaca-py` SDK.
 
-You type `scan`, it finds one candidate trade using a documented
-**multi-indicator momentum** strategy (moving-average crossover + RSI + MACD +
-volume), shows you exactly why it picked it and how big the order would be, and
-asks for confirmation before placing anything.
+You type `scan` (or **find** in the web chat), it finds one candidate using a
+documented **multi-indicator momentum** strategy (moving-average crossover +
+RSI + MACD + volume), then hands you a full **trade plan** — how many shares, a
+volatility-based **stop-loss** and a **take-profit** at a 1:2 reward:risk, the
+dollar cost, the dollars at risk, the potential profit, why it picked the stock,
+and which strategy — and asks you to confirm. On **Yes** it places a **bracket
+order** so the stop-loss and take-profit are attached automatically.
 
 **It defaults to paper trading (fake money). You have to go out of your way to
 enable live trading.**

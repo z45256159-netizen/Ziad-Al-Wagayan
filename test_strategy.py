@@ -7,7 +7,7 @@ These run WITHOUT any API keys or network access:
 
 import unittest
 
-from sizing import size_position
+from sizing import build_trade_plan, size_position
 from strategy import Bar, find_candidate, score_symbol
 
 
@@ -101,6 +101,39 @@ class TestSizing(unittest.TestCase):
         r = size_position(price=100, buying_power=0,
                           position_size_pct=0.05, max_order_dollars=1000)
         self.assertFalse(r.ok)
+
+
+class TestTradePlan(unittest.TestCase):
+    def _score(self):
+        # A qualifying candidate with a known price and ATR.
+        return score_symbol("UP", [
+            Bar(close=c, volume=v, high=c + 1, low=c - 1)
+            for c, v in zip(_uptrend_closes(), [1000] * 59 + [5000])
+        ])
+
+    def test_plan_has_stop_below_and_target_above(self):
+        s = self._score()
+        self.assertIsNotNone(s)
+        plan = build_trade_plan(s, buying_power=100_000, risk_pct=0.01,
+                                max_order_dollars=2000)
+        self.assertTrue(plan.ok)
+        self.assertLess(plan.stop, plan.entry)          # stop below entry
+        self.assertGreater(plan.take_profit, plan.entry)  # target above entry
+        self.assertGreaterEqual(plan.qty, 1)
+
+    def test_reward_risk_is_two_to_one(self):
+        s = self._score()
+        plan = build_trade_plan(s, buying_power=100_000, risk_pct=0.01,
+                                max_order_dollars=2000)
+        # take-profit distance is 2x the stop distance -> RR ~ 2.0
+        self.assertAlmostEqual(plan.rr_ratio, 2.0, places=1)
+        self.assertAlmostEqual(plan.reward_total, plan.risk_total * 2, delta=0.05)
+
+    def test_more_than_one_share_with_a_real_account(self):
+        s = self._score()
+        plan = build_trade_plan(s, buying_power=100_000, risk_pct=0.01,
+                                max_order_dollars=2000)
+        self.assertGreater(plan.qty, 1)  # not stuck on 1 share
 
 
 if __name__ == "__main__":
