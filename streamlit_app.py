@@ -19,10 +19,11 @@ import os
 import streamlit as st
 from alpaca.trading.enums import OrderSide
 
+from ai import ai_choose
 from broker import Broker, BrokerError
 from config import Config, ConfigError
 from sizing import size_position
-from strategy import find_candidate
+from strategy import rank_candidates
 from universe import UNIVERSE
 
 
@@ -109,7 +110,7 @@ if "candidate" not in st.session_state:
     st.session_state.candidate = None
 
 
-def run_scan() -> None:
+def run_scan(use_ai: bool, ai_key: str) -> None:
     """Scan the universe and stash the top tradeable candidate in session state."""
     st.session_state.candidate = None
     with st.spinner(f"Scanning {len(UNIVERSE)} tickers…"):
@@ -131,22 +132,34 @@ def run_scan() -> None:
         st.warning("No market data returned. Try again shortly.")
         return
 
-    candidate = find_candidate(bars)
-    if candidate is None:
+    ranked = rank_candidates(bars)
+    if not ranked:
         st.warning("No candidates passed the strategy filters right now. "
                    "Nothing to trade.")
         return
 
-    # Skip anything we already hold.
+    # Drop anything we already hold.
     try:
         held = broker.held_symbols()
     except BrokerError as exc:
         st.error(f"Couldn't check positions: {exc}")
         return
-    if candidate.symbol in held:
-        st.info(f"Top pick **{candidate.symbol}** is already in your portfolio — "
-                "skipping to avoid stacking a position.")
+    tradeable = [c for c in ranked if c.symbol not in held]
+    if not tradeable:
+        st.info("The top candidates are all already in your portfolio — "
+                "skipping to avoid stacking positions.")
         return
+
+    # Default to the rule-based #1. If AI is on, let Claude pick among the top few.
+    candidate = tradeable[0]
+    ai_result = None
+    if use_ai and ai_key:
+        with st.spinner("Asking Claude for a second opinion…"):
+            ai_result = ai_choose(tradeable[:6], ai_key)
+        if ai_result is not None:
+            match = next((c for c in tradeable if c.symbol == ai_result.symbol), None)
+            if match is not None:
+                candidate = match  # AI's pick (falls back to #1 if it named an odd one)
 
     # Size it.
     try:
@@ -160,13 +173,25 @@ def run_scan() -> None:
         position_size_pct=cfg.position_size_pct,
         max_order_dollars=cfg.max_order_dollars,
     )
-    st.session_state.candidate = {"c": candidate, "s": sizing}
+    st.session_state.candidate = {"c": candidate, "s": sizing, "ai": ai_result}
 
+
+# --- AI toggle (only meaningful when an Anthropic API key is configured) ---
+ai_key = _secret("ANTHROPIC_API_KEY").strip()
+if ai_key:
+    use_ai = st.toggle("🤖 Let Claude AI pick the trade", value=True,
+                       help="Claude reviews the top candidates' real numbers and "
+                            "chooses one, with a plain-English rationale.")
+else:
+    use_ai = False
+    st.caption("💡 Add an `ANTHROPIC_API_KEY` (from console.anthropic.com) in "
+               "Secrets to have Claude AI pick and explain the trade. Without it, "
+               "the rule-based momentum + volume scanner runs on its own.")
 
 # --- Action buttons ---
 b1, b2 = st.columns(2)
 if b1.button("🔍 Scan for a trade", use_container_width=True, type="primary"):
-    run_scan()
+    run_scan(use_ai, ai_key)
 if b2.button("🔄 Clear", use_container_width=True):
     st.session_state.candidate = None
 
@@ -175,10 +200,18 @@ stash = st.session_state.candidate
 if stash:
     c = stash["c"]
     s = stash["s"]
+    ai = stash.get("ai")
     st.subheader(f"Candidate: {c.symbol}")
     st.write(f"**Current price:** ${c.last_price:,.2f}")
     st.write(f"**Signal:** {c.reason}")
     st.write(f"**Score:** {c.score:.4f}")
+
+    if ai is not None:
+        badge = {"GO": "🟢", "CAUTION": "🟡", "NO-GO": "🔴"}.get(ai.recommendation, "🤖")
+        st.markdown(
+            f"**🤖 Claude's take — {badge} {ai.recommendation}** "
+            f"(confidence: {ai.confidence})\n\n{ai.rationale}"
+        )
 
     if not s.ok:
         st.warning(f"No order proposed — {s.skipped_reason}")

@@ -122,20 +122,21 @@ def score_symbol(symbol: str, bars: List[Bar]) -> Optional[SymbolScore]:
 SCORING_FN: Callable[[str, List[Bar]], Optional[SymbolScore]] = score_symbol
 
 
-def find_candidate(bars_by_symbol: dict[str, List[Bar]]) -> Optional[SymbolScore]:
+def rank_candidates(bars_by_symbol: dict[str, List[Bar]]) -> List[SymbolScore]:
     """
-    Score every symbol we have data for and return the single best candidate,
-    or None if nothing passes the filters.
+    Score every symbol we have data for and return all that pass the filters,
+    sorted best-first. Returns an empty list if nothing qualifies.
     """
     scored: List[SymbolScore] = []
     for symbol, bars in bars_by_symbol.items():
         result = SCORING_FN(symbol, bars)
         if result is not None:
             scored.append(result)
-
-    if not scored:
-        return None
-
-    # Highest score wins.
     scored.sort(key=lambda s: s.score, reverse=True)
-    return scored[0]
+    return scored
+
+
+def find_candidate(bars_by_symbol: dict[str, List[Bar]]) -> Optional[SymbolScore]:
+    """Return the single best candidate, or None if nothing passes the filters."""
+    ranked = rank_candidates(bars_by_symbol)
+    return ranked[0] if ranked else None
