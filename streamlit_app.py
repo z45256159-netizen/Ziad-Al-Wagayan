@@ -274,8 +274,20 @@ def handle_command(text: str) -> None:
 
     if any(w in t for w in ("find", "scan", "trade", "buy something")):
         msg, pending = build_trade()
-        ss.pending = pending
-        say("assistant", msg)
+        if pending is not None and ss.auto_mode:
+            ai = pending.get("ai")
+            if ai is not None and ai.recommendation == "NO-GO":
+                ss.pending = None
+                say("assistant", msg + "\n\n🤖 **Auto mode:** the AI flagged this "
+                                        "**NO-GO**, so I skipped it. Type **find** "
+                                        "for another.")
+            else:
+                say("assistant", msg)   # show the plan
+                ss.pending = pending
+                place_pending()         # ...then place it automatically
+        else:
+            ss.pending = pending
+            say("assistant", msg)
     elif "balance" in t or "money" in t or "account" in t:
         try:
             a = broker.get_account()
@@ -311,6 +323,7 @@ ss.setdefault("risk_pct", cfg.risk_pct)
 ss.setdefault("max_order", cfg.max_order_dollars)
 ss.setdefault("stop_mult", 1.5)
 ss.setdefault("reward_risk", 2.0)
+ss.setdefault("auto_mode", False)
 
 # --- A little CSS polish (theme-aware) ---
 st.markdown("""
@@ -370,6 +383,20 @@ with st.expander("⚙️ Trading settings"):
         help="Take-profit distance as a multiple of the stop distance.")
     st.caption(f"Now: risk {ss.risk_pct*100:.2f}% · max ${ss.max_order:,.0f} · "
                f"stop {ss.stop_mult:g}×ATR · reward:risk 1:{ss.reward_risk:g}")
+
+    st.markdown("---")
+    ss.auto_mode = st.checkbox(
+        "🤖 Auto mode — let the AI find AND place the trade by itself",
+        value=ss.auto_mode,
+        help="When on, typing 'find' picks the best trade and places it "
+             "automatically (with stop-loss + take-profit) using your settings "
+             "above — no Yes/No. It skips a trade only if the AI says NO-GO.")
+    if ss.auto_mode:
+        if cfg.live:
+            st.warning("⚠️ Auto mode with **LIVE** money places REAL orders with "
+                       "no confirmation. Use paper mode to practice.")
+        else:
+            st.info("Auto mode is ON (paper). Type **find** and it trades on its own.")
     if st.button("Disconnect / change keys", use_container_width=True):
         for k in ("connected", "broker", "cfg", "groq_key", "pending"):
             ss[k] = False if k == "connected" else (None if k != "groq_key" else "")
