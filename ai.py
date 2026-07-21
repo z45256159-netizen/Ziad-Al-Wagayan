@@ -1,19 +1,16 @@
 """
-Optional AI layer — a FREE "second opinion" on the scan.
+Optional AI layer — a FREE "second opinion" powered by Groq.
 
-This is OFF unless you provide a free API key. It uses providers that expose the
-standard OpenAI-compatible chat API, so no paid service and no extra Python
-packages are required (calls go out via the standard library).
+This is OFF unless you provide a free Groq API key. It calls Groq's chat API
+directly over the standard library (no paid service, no extra Python packages).
 
-Get a FREE key (no credit card):
-  * Groq        -> https://console.groq.com   (fast; set GROQ_API_KEY)        [default]
-  * OpenRouter  -> https://openrouter.ai       (free models; OPENROUTER_API_KEY)
+Get a FREE Groq key (no credit card): https://console.groq.com  ->  API Keys
 
-When enabled, the app hands the AI the real numbers the scanner computed for the
+When enabled, the app hands Groq the real numbers the scanner computed for the
 top candidates and asks it to pick the single best short-term trade and explain
-why. The AI only ever sees data WE fetched from Alpaca — it never invents prices.
-If the call fails for any reason, the app silently falls back to the rule-based
-pick, so this can never break scanning.
+why. Groq only ever sees data WE fetched from Alpaca — it never invents prices.
+If the call fails, the app falls back to the rule-based pick, so this can never
+break scanning.
 """
 
 from __future__ import annotations
@@ -27,19 +24,9 @@ from typing import List, Optional
 
 from strategy import SymbolScore
 
-# Free, OpenAI-compatible providers. `model` is a sensible free default per
-# provider — override with the AI_MODEL secret if you like.
-PROVIDERS = {
-    "groq": {
-        "url": "https://api.groq.com/openai/v1/chat/completions",
-        "model": "llama-3.3-70b-versatile",
-    },
-    "openrouter": {
-        "url": "https://openrouter.ai/api/v1/chat/completions",
-        "model": "meta-llama/llama-3.3-70b-instruct:free",
-    },
-}
-DEFAULT_PROVIDER = "groq"
+# Groq endpoint + a solid free model. Override the model with the AI_MODEL secret.
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_MODEL = "llama-3.3-70b-versatile"
 
 
 @dataclass
@@ -48,6 +35,39 @@ class AIResult:
     recommendation: str  # GO / CAUTION / NO-GO
     confidence: str      # low / medium / high
     rationale: str
+
+
+def _post(api_key: str, payload: dict, timeout: int = 30) -> Optional[dict]:
+    """POST to Groq and return the parsed JSON body, or None on any failure."""
+    request = urllib.request.Request(
+        GROQ_URL,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, ValueError, TimeoutError):
+        return None
+
+
+def verify_key(api_key: str, model: str = GROQ_MODEL) -> bool:
+    """Cheap check that a Groq key actually works."""
+    if not api_key:
+        return False
+    body = _post(api_key, {
+        "model": model,
+        "messages": [{"role": "user", "content": "Reply with the single word: OK"}],
+        "max_tokens": 5,
+    }, timeout=15)
+    try:
+        return bool(body["choices"][0]["message"]["content"])
+    except (TypeError, KeyError, IndexError):
+        return False
 
 
 def _build_messages(candidates: List[SymbolScore]) -> list:
@@ -97,51 +117,35 @@ def _extract_json(text: str) -> Optional[dict]:
 def ai_choose(
     candidates: List[SymbolScore],
     api_key: str,
-    provider: str = DEFAULT_PROVIDER,
     model: Optional[str] = None,
 ) -> Optional[AIResult]:
     """
-    Ask a free LLM to pick the best candidate. Returns an AIResult, or None if
-    the call fails (caller then falls back to the rule-based pick).
+    Ask Groq to pick the best candidate. Returns an AIResult, or None if the
+    call fails (caller then falls back to the rule-based pick).
     """
     if not candidates or not api_key:
         return None
 
-    cfg = PROVIDERS.get(provider)
-    if cfg is None:
-        return None
-
-    payload = {
-        "model": model or cfg["model"],
+    body = _post(api_key, {
+        "model": model or GROQ_MODEL,
         "messages": _build_messages(candidates),
         "temperature": 0.2,
         "max_tokens": 400,
         "response_format": {"type": "json_object"},
-    }
-
-    request = urllib.request.Request(
-        cfg["url"],
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
-
-    try:
-        with urllib.request.urlopen(request, timeout=30) as resp:
-            body = json.loads(resp.read().decode("utf-8"))
-        content = body["choices"][0]["message"]["content"]
-        data = _extract_json(content)
-        if not data:
-            return None
-        return AIResult(
-            symbol=str(data["symbol"]).upper(),
-            recommendation=str(data.get("recommendation", "CAUTION")).upper(),
-            confidence=str(data.get("confidence", "medium")).lower(),
-            rationale=str(data.get("rationale", "")).strip(),
-        )
-    except (urllib.error.URLError, KeyError, ValueError, TimeoutError):
-        # Bad key, network issue, rate limit, unexpected shape -> clean fallback.
+    })
+    if body is None:
         return None
+    try:
+        content = body["choices"][0]["message"]["content"]
+    except (TypeError, KeyError, IndexError):
+        return None
+
+    data = _extract_json(content)
+    if not data:
+        return None
+    return AIResult(
+        symbol=str(data["symbol"]).upper(),
+        recommendation=str(data.get("recommendation", "CAUTION")).upper(),
+        confidence=str(data.get("confidence", "medium")).lower(),
+        rationale=str(data.get("rationale", "")).strip(),
+    )

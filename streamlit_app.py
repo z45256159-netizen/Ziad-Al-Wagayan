@@ -1,15 +1,13 @@
 """
-Web version of the Alpaca trading bot — a phone-friendly website.
+Alpaca trading bot — chat-style website.
 
-Run locally:
-    streamlit run streamlit_app.py
+Flow:
+  1. Paste your Alpaca keys (and optional free Groq key). The app checks them.
+  2. Chat: type "find" and it finds one trade, shows the reason, and asks you.
+  3. Tap Yes to place it, No to skip.
 
-Or deploy free to Streamlit Community Cloud (see README) to get a permanent URL
-you can open on your phone. Your API keys go in the host's "Secrets" box, never
-in the code.
-
-It reuses the exact same engine as the CLI: strategy.py (the swappable scan),
-sizing.py (risk), broker.py (Alpaca), universe.py (tickers).
+Run locally:  streamlit run streamlit_app.py
+Deploy free:  see README (Streamlit Community Cloud).
 """
 
 from __future__ import annotations
@@ -19,17 +17,26 @@ import os
 import streamlit as st
 from alpaca.trading.enums import OrderSide
 
-from ai import ai_choose
+from ai import ai_choose, verify_key
 from broker import Broker, BrokerError
 from config import Config, ConfigError
 from sizing import size_position
 from strategy import rank_candidates
 from universe import UNIVERSE
 
+st.set_page_config(page_title="Alpaca Trading Bot", page_icon="📈", layout="centered")
 
-# --------------------------------------------------------------------- settings
+ss = st.session_state
+ss.setdefault("connected", False)
+ss.setdefault("messages", [])      # chat history: [{"role","content"}]
+ss.setdefault("pending", None)     # trade awaiting yes/no: {"c","s","ai"}
+ss.setdefault("broker", None)
+ss.setdefault("cfg", None)
+ss.setdefault("groq_key", "")
+
+
 def _secret(name: str, default: str = "") -> str:
-    """Read a setting from Streamlit secrets first, then the environment."""
+    """Prefill from Streamlit secrets / env if available (optional)."""
     try:
         if name in st.secrets:
             return str(st.secrets[name])
@@ -38,237 +45,259 @@ def _secret(name: str, default: str = "") -> str:
     return os.getenv(name, default)
 
 
-def build_config() -> Config:
-    """Assemble a validated Config from the host's secrets/env."""
-    live = _secret("LIVE", "false").strip().lower() in ("1", "true", "yes", "on")
-    return Config(
-        api_key=_secret("ALPACA_API_KEY").strip(),
-        api_secret=_secret("ALPACA_API_SECRET").strip(),
-        live=live,
-        position_size_pct=float(_secret("POSITION_SIZE_PCT", "0.05")),
-        max_order_dollars=float(_secret("MAX_ORDER_DOLLARS", "1000")),
-        lookback_days=int(_secret("LOOKBACK_DAYS", "20")),
-    )
+def say(role: str, content: str) -> None:
+    ss.messages.append({"role": role, "content": content})
 
 
-@st.cache_resource(show_spinner=False)
-def get_broker(_cfg_key: str, cfg: Config) -> Broker:
-    """Cache one Broker per unique key so we don't reconnect on every rerun."""
-    return Broker(cfg)
+# ===========================================================================
+# 1) CONNECT SCREEN — paste keys, verify they work
+# ===========================================================================
+if not ss.connected:
+    st.title("📈 Alpaca Trading Bot")
+    st.caption("Paste your keys to start. They stay in this browser session only.")
 
+    with st.form("connect"):
+        st.markdown("**Alpaca keys** (from app.alpaca.markets → Paper Trading)")
+        alp_key = st.text_input("Alpaca API key", value=_secret("ALPACA_API_KEY"),
+                                type="password")
+        alp_sec = st.text_input("Alpaca API secret", value=_secret("ALPACA_API_SECRET"),
+                                type="password")
 
-# --------------------------------------------------------------------------- UI
-st.set_page_config(page_title="Alpaca Trading Bot", page_icon="📈", layout="centered")
-st.title("📈 Alpaca Trading Bot")
-st.caption("Momentum + volume scanner · confirm before every order")
+        st.markdown("**Groq key** — free AI (from console.groq.com). Optional.")
+        groq_key = st.text_input("Groq API key", value=_secret("GROQ_API_KEY"),
+                                 type="password")
 
-# Build config; if keys are missing, guide the user instead of crashing.
-try:
-    cfg = build_config()
-except (ConfigError, ValueError) as exc:
-    st.warning("⚙️ **Not configured yet.**")
-    st.write(
-        "Add your Alpaca **paper** API key and secret in the host's *Secrets* "
-        "settings (or a local `.streamlit/secrets.toml`), then reload:"
-    )
-    st.code(
-        'ALPACA_API_KEY="PK...your key..."\n'
-        'ALPACA_API_SECRET="...your secret..."\n'
-        'LIVE="false"',
-        language="toml",
-    )
-    st.caption(f"Details: {exc}")
+        live = st.checkbox("⚠️ Live trading (REAL money)", value=False)
+        submitted = st.form_submit_button("Connect", use_container_width=True,
+                                          type="primary")
+
+    if submitted:
+        try:
+            cfg = Config(
+                api_key=alp_key.strip(),
+                api_secret=alp_sec.strip(),
+                live=live,
+                position_size_pct=float(_secret("POSITION_SIZE_PCT", "0.05")),
+                max_order_dollars=float(_secret("MAX_ORDER_DOLLARS", "1000")),
+                lookback_days=int(_secret("LOOKBACK_DAYS", "20")),
+            )
+        except (ConfigError, ValueError) as exc:
+            st.error(f"Check your entries: {exc}")
+            st.stop()
+
+        # Verify Alpaca keys by fetching the account.
+        with st.spinner("Checking your Alpaca keys…"):
+            try:
+                broker = Broker(cfg)
+                acct = broker.get_account()
+            except BrokerError as exc:
+                st.error(f"❌ Alpaca keys didn't work: {exc}")
+                st.info("Make sure they're **paper** keys and 'Live trading' is "
+                        "unchecked (or use live keys with it checked).")
+                st.stop()
+
+        # Verify Groq key if one was entered.
+        groq_msg = "No AI key — the built-in scanner will decide trades."
+        gk = groq_key.strip()
+        if gk:
+            with st.spinner("Checking your Groq AI key…"):
+                if verify_key(gk):
+                    groq_msg = "🤖 Groq AI connected — it will pick and explain trades."
+                else:
+                    gk = ""
+                    groq_msg = "⚠️ That Groq key didn't work, so the built-in " \
+                               "scanner will decide trades. (You can reconnect later.)"
+
+        ss.broker = broker
+        ss.cfg = cfg
+        ss.groq_key = gk
+        ss.connected = True
+        ss.messages = []
+        ss.pending = None
+        say("assistant",
+            f"✅ Connected to Alpaca ({cfg.mode_name}). {groq_msg}\n\n"
+            f"Type **find** to find a trade. You can also type **balance** or "
+            f"**positions**.")
+        st.rerun()
+
     st.stop()
 
-# Loud mode banner.
-if cfg.live:
-    st.error("⚠️ **LIVE TRADING IS ON — orders use REAL money.** "
-             "Set `LIVE=\"false\"` in secrets to return to the paper sandbox.")
-else:
-    st.success("🟢 **Paper mode** — safe sandbox, fake money.")
 
-# Connect.
-try:
-    broker = get_broker(f"{cfg.api_key}:{cfg.live}", cfg)
-    account = broker.get_account()
-except BrokerError as exc:
-    st.error(f"Couldn't connect to Alpaca: {exc}")
-    st.info("Double-check your key/secret, and that LIVE matches the key type "
-            "(paper keys need LIVE=false).")
-    st.stop()
-
-# Account strip.
-c1, c2, c3 = st.columns(3)
-c1.metric("Buying power", f"${float(account.buying_power):,.0f}")
-c2.metric("Cash", f"${float(account.cash):,.0f}")
-c3.metric("Portfolio", f"${float(account.portfolio_value):,.0f}")
-
-st.divider()
-
-# Session state to carry the scanned candidate across button clicks.
-if "candidate" not in st.session_state:
-    st.session_state.candidate = None
+# ===========================================================================
+# Connected — set up helpers
+# ===========================================================================
+broker: Broker = ss.broker
+cfg: Config = ss.cfg
 
 
-def run_scan(use_ai: bool, ai_key: str, ai_provider: str) -> None:
-    """Scan the universe and stash the top tradeable candidate in session state."""
-    st.session_state.candidate = None
-    with st.spinner(f"Scanning {len(UNIVERSE)} tickers…"):
-        try:
-            market_open = broker.is_market_open()
-        except BrokerError:
-            market_open = None
-        try:
-            bars = broker.fetch_bars(UNIVERSE)
-        except BrokerError as exc:
-            st.error(f"Market data error: {exc}")
-            return
-
-    if market_open is False:
-        st.info("Market is currently **closed** — an order will queue until the "
-                "next open.")
+def build_trade():
+    """Scan and pick one trade. Returns (assistant_text, pending_dict_or_None)."""
+    try:
+        market_open = broker.is_market_open()
+    except BrokerError:
+        market_open = None
+    try:
+        bars = broker.fetch_bars(UNIVERSE)
+    except BrokerError as exc:
+        return f"⚠️ Couldn't get market data: {exc}", None
 
     if not bars:
-        st.warning("No market data returned. Try again shortly.")
-        return
+        return "No market data came back. Try again in a moment.", None
 
     ranked = rank_candidates(bars)
     if not ranked:
-        st.warning("No candidates passed the strategy filters right now. "
-                   "Nothing to trade.")
-        return
+        return ("No stock passed the momentum + volume filters right now — "
+                "nothing worth trading. Try again later."), None
 
-    # Drop anything we already hold.
     try:
         held = broker.held_symbols()
     except BrokerError as exc:
-        st.error(f"Couldn't check positions: {exc}")
-        return
+        return f"⚠️ Couldn't check your positions: {exc}", None
     tradeable = [c for c in ranked if c.symbol not in held]
     if not tradeable:
-        st.info("The top candidates are all already in your portfolio — "
-                "skipping to avoid stacking positions.")
-        return
+        return ("The best candidates are all already in your portfolio — "
+                "skipping to avoid doubling up."), None
 
-    # Default to the rule-based #1. If AI is on, let Claude pick among the top few.
     candidate = tradeable[0]
-    ai_result = None
-    if use_ai and ai_key:
-        with st.spinner("Asking the AI for a second opinion…"):
-            ai_result = ai_choose(tradeable[:6], ai_key, provider=ai_provider)
-        if ai_result is not None:
-            match = next((c for c in tradeable if c.symbol == ai_result.symbol), None)
+    ai = None
+    if ss.groq_key:
+        ai = ai_choose(tradeable[:6], ss.groq_key)
+        if ai is not None:
+            match = next((c for c in tradeable if c.symbol == ai.symbol), None)
             if match is not None:
-                candidate = match  # AI's pick (falls back to #1 if it named an odd one)
+                candidate = match
 
-    # Size it.
     try:
         buying_power = broker.get_buying_power()
     except BrokerError as exc:
-        st.error(f"Error: {exc}")
-        return
+        return f"⚠️ Couldn't read your buying power: {exc}", None
+
     sizing = size_position(
         price=candidate.last_price,
         buying_power=buying_power,
         position_size_pct=cfg.position_size_pct,
         max_order_dollars=cfg.max_order_dollars,
     )
-    st.session_state.candidate = {"c": candidate, "s": sizing, "ai": ai_result}
 
-
-# --- AI toggle (uses a FREE provider key if one is configured) ---
-# Groq is the default (free, fast, no credit card); OpenRouter is a free backup.
-groq_key = _secret("GROQ_API_KEY").strip()
-openrouter_key = _secret("OPENROUTER_API_KEY").strip()
-if groq_key:
-    ai_provider, ai_key = "groq", groq_key
-elif openrouter_key:
-    ai_provider, ai_key = "openrouter", openrouter_key
-else:
-    ai_provider, ai_key = "groq", ""
-
-if ai_key:
-    use_ai = st.toggle("🤖 Let the AI pick the trade (free)", value=True,
-                       help="The AI reviews the top candidates' real numbers and "
-                            "chooses one, with a plain-English rationale.")
-else:
-    use_ai = False
-    st.caption("💡 Add a **free** `GROQ_API_KEY` (from console.groq.com — no "
-               "credit card) in Secrets to have the AI pick and explain the "
-               "trade. Without it, the rule-based momentum + volume scanner "
-               "runs on its own.")
-
-# --- Action buttons ---
-b1, b2 = st.columns(2)
-if b1.button("🔍 Scan for a trade", use_container_width=True, type="primary"):
-    run_scan(use_ai, ai_key, ai_provider)
-if b2.button("🔄 Clear", use_container_width=True):
-    st.session_state.candidate = None
-
-# --- Candidate card ---
-stash = st.session_state.candidate
-if stash:
-    c = stash["c"]
-    s = stash["s"]
-    ai = stash.get("ai")
-    st.subheader(f"Candidate: {c.symbol}")
-    st.write(f"**Current price:** ${c.last_price:,.2f}")
-    st.write(f"**Signal:** {c.reason}")
-    st.write(f"**Score:** {c.score:.4f}")
-
+    # Build the message.
+    parts = [f"**Found: {candidate.symbol}** at ${candidate.last_price:,.2f}",
+             f"_{candidate.reason}_"]
     if ai is not None:
         badge = {"GO": "🟢", "CAUTION": "🟡", "NO-GO": "🔴"}.get(ai.recommendation, "🤖")
-        st.markdown(
-            f"**🤖 AI's take — {badge} {ai.recommendation}** "
-            f"(confidence: {ai.confidence})\n\n{ai.rationale}"
-        )
+        parts.append(f"🤖 AI: {badge} **{ai.recommendation}** "
+                     f"({ai.confidence} confidence) — {ai.rationale}")
+    if market_open is False:
+        parts.append("_Market is closed — the order will queue until it opens._")
 
-    if not s.ok:
-        st.warning(f"No order proposed — {s.skipped_reason}")
-    else:
-        st.info(
-            f"**Proposed order:** BUY {s.qty} share(s) of {c.symbol} "
-            f"(~${s.estimated_cost:,.2f})\n\n**How sized:** {s.explanation}"
-        )
-        # Explicit confirm step, mirroring the CLI's yes/no.
-        confirm = st.checkbox("I confirm I want to place this order")
-        if st.button("✅ Place order", disabled=not confirm,
-                     use_container_width=True):
-            try:
-                order = broker.submit_market_order(
-                    symbol=c.symbol, qty=s.qty, side=OrderSide.BUY
-                )
-                status = getattr(order.status, "value", order.status)
-                st.success(
-                    f"Order submitted! ID `{order.id}` — {order.symbol} "
-                    f"×{order.qty} — status **{status}**"
-                )
-                st.session_state.candidate = None  # avoid double-buy
-            except BrokerError as exc:
-                st.error(f"Order failed: {exc}")
+    if not sizing.ok:
+        parts.append(f"But I can't size an order: {sizing.skipped_reason}")
+        return "\n\n".join(parts), None
 
-st.divider()
+    parts.append(f"**Proposed: BUY {sizing.qty} share(s) (~${sizing.estimated_cost:,.2f}).**")
+    parts.append("Place it? Tap **Yes** or **No** below (or type yes / no).")
+    pending = {"c": candidate, "s": sizing, "ai": ai}
+    return "\n\n".join(parts), pending
 
-# --- Positions expander ---
-with st.expander("📊 My positions"):
+
+def place_pending() -> None:
+    p = ss.pending
+    ss.pending = None
+    c, s = p["c"], p["s"]
     try:
-        positions = broker.get_positions()
+        order = broker.submit_market_order(symbol=c.symbol, qty=s.qty, side=OrderSide.BUY)
+        status = getattr(order.status, "value", order.status)
+        say("assistant", f"✅ Order placed! **{order.symbol} ×{order.qty}** — "
+                         f"status **{status}** (id `{order.id}`).")
     except BrokerError as exc:
-        st.error(f"Error: {exc}")
-        positions = []
-    if not positions:
-        st.write("No open positions.")
-    else:
-        st.table([
-            {
-                "Symbol": p.symbol,
-                "Qty": float(p.qty),
-                "Avg": round(float(p.avg_entry_price), 2),
-                "Price": round(float(p.current_price), 2),
-                "Mkt value": round(float(p.market_value), 2),
-                "P/L": round(float(p.unrealized_pl), 2),
-            }
-            for p in positions
-        ])
+        say("assistant", f"❌ Order failed: {exc}")
 
-st.caption("Educational tool, not financial advice. Test in paper mode first.")
+
+def handle_command(text: str) -> None:
+    t = text.strip().lower()
+    say("user", text)
+
+    # Yes/No while a trade is pending.
+    if ss.pending is not None:
+        if t in ("yes", "y", "place", "buy", "ok", "yeah"):
+            place_pending()
+            return
+        if t in ("no", "n", "cancel", "skip", "stop"):
+            ss.pending = None
+            say("assistant", "👍 Skipped. Type **find** whenever you want another.")
+            return
+
+    if any(w in t for w in ("find", "scan", "trade", "buy something")):
+        msg, pending = build_trade()
+        ss.pending = pending
+        say("assistant", msg)
+    elif "balance" in t or "money" in t or "account" in t:
+        try:
+            a = broker.get_account()
+            say("assistant",
+                f"💰 Buying power **${float(a.buying_power):,.2f}** · "
+                f"cash ${float(a.cash):,.2f} · "
+                f"portfolio ${float(a.portfolio_value):,.2f}.")
+        except BrokerError as exc:
+            say("assistant", f"⚠️ {exc}")
+    elif "position" in t or "holding" in t or "portfolio" in t:
+        try:
+            ps = broker.get_positions()
+        except BrokerError as exc:
+            say("assistant", f"⚠️ {exc}")
+            return
+        if not ps:
+            say("assistant", "You have no open positions.")
+        else:
+            rows = "\n".join(
+                f"- **{p.symbol}** ×{float(p.qty):g} · now ${float(p.current_price):,.2f} "
+                f"· P/L ${float(p.unrealized_pl):,.2f}" for p in ps)
+            say("assistant", "📊 Your positions:\n" + rows)
+    else:
+        say("assistant", "Type **find** to find a trade, or **balance** / "
+                         "**positions**.")
+
+
+# ===========================================================================
+# 2) CHAT SCREEN
+# ===========================================================================
+if cfg.live:
+    st.error("⚠️ LIVE trading — orders use REAL money.")
+else:
+    st.title("📈 Alpaca Trading Bot")
+    st.caption("🟢 Paper mode — fake money, safe to experiment.")
+
+top = st.columns([3, 1])
+with top[0]:
+    try:
+        bp = float(broker.get_account().buying_power)
+        st.caption(f"Buying power: ${bp:,.0f}")
+    except BrokerError:
+        st.caption("Buying power: —")
+with top[1]:
+    if st.button("Disconnect"):
+        for k in ("connected", "broker", "cfg", "groq_key", "pending"):
+            ss[k] = False if k == "connected" else (None if k != "groq_key" else "")
+        ss.messages = []
+        st.rerun()
+
+# Render chat history.
+for m in ss.messages:
+    with st.chat_message(m["role"]):
+        st.markdown(m["content"])
+
+# Yes/No buttons when a trade is waiting.
+if ss.pending is not None:
+    yn = st.columns(2)
+    if yn[0].button("✅ Yes, place it", use_container_width=True, type="primary"):
+        place_pending()
+        st.rerun()
+    if yn[1].button("❌ No, skip", use_container_width=True):
+        ss.pending = None
+        say("assistant", "👍 Skipped. Type **find** whenever you want another.")
+        st.rerun()
+
+# Chat input.
+prompt = st.chat_input("Type 'find' to find a trade…")
+if prompt:
+    handle_command(prompt)
+    st.rerun()

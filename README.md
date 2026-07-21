@@ -76,9 +76,11 @@ Your `.env` is git-ignored, so your keys won't be committed.
 
 ## 🌐 The website (phone-friendly) — recommended
 
-There's a web version (`streamlit_app.py`) with **Scan / Place Order / Balance /
-Positions** buttons that works great on a phone. Deploy it free once and you get
-a permanent URL you just open in your browser.
+The web version (`streamlit_app.py`) is a **chat** that works great on a phone.
+You **paste your keys right in the app** (it checks they work), then just type
+**find** — it finds one trade, explains it, and you tap **Yes** or **No** to
+place it. Deploy it free once and you get a permanent URL you open in your
+browser; after that there's no more setup — open the link, paste keys, chat.
 
 > Why does it need hosting instead of being a plain link? Because it talks to
 > your real brokerage account. Your secret key must live on a server (never in a
@@ -91,16 +93,15 @@ a permanent URL you just open in your browser.
    GitHub.
 3. Click **Create app** → pick this repo, your branch, and
    `streamlit_app.py` as the main file.
-4. Open **Advanced settings → Secrets** and paste (using your **paper** keys):
-   ```toml
-   ALPACA_API_KEY = "PK...your paper key..."
-   ALPACA_API_SECRET = "...your paper secret..."
-   LIVE = "false"
-   # Optional — turns on the FREE AI pick (see below):
-   # GROQ_API_KEY = "gsk_..."
-   ```
-5. Click **Deploy**. You'll get a URL like `https://your-app.streamlit.app` —
-   bookmark it on your phone. Done.
+4. Click **Deploy**. You'll get a URL like `https://your-app.streamlit.app` —
+   bookmark it on your phone.
+5. Open the link and **paste your keys in the app** — Alpaca key + secret, and
+   (optionally) your free Groq key. The app checks them, then you chat.
+
+> You do **not** need to put keys in Streamlit's Secrets box — the app asks for
+> them on screen. (If you'd rather pre-fill them so you don't retype each visit,
+> you *can* add `ALPACA_API_KEY`, `ALPACA_API_SECRET`, `LIVE`, and `GROQ_API_KEY`
+> under **Advanced settings → Secrets** — they'll auto-fill the form.)
 
 ### 🧠 The bot already has a brain (no AI needed)
 
@@ -110,22 +111,16 @@ with it and never turn on any AI. The AI below is an optional *second opinion*.
 
 ### 🤖 Optional: let a FREE AI pick the trade
 
-If you add a `GROQ_API_KEY` to the secrets, a **"Let the AI pick the trade"**
-toggle appears. When on, the scanner still finds the qualifying candidates, then
-the AI reviews their real numbers, chooses one, and shows a plain-English
-GO / CAUTION / NO-GO rationale. Without the key, the rule-based scanner runs on
-its own — the app works fully either way.
+If you enter a **Groq** key when connecting, the AI reviews the qualifying
+candidates' real numbers, chooses one, and shows a plain-English
+GO / CAUTION / NO-GO rationale in the chat. Leave it blank and the rule-based
+scanner decides on its own — the app works fully either way.
 
-> **It's free.** Get a **free** API key (no credit card) from
-> **[console.groq.com](https://console.groq.com)** and paste it as `GROQ_API_KEY`.
-> Groq runs fast open models (Llama 3.3 70B) at no cost. Prefer a different free
-> provider? Set `OPENROUTER_API_KEY` instead (from
-> [openrouter.ai](https://openrouter.ai)) — the app uses it automatically if no
-> Groq key is present.
->
-> The AI only ever sees the price/volume data the app already fetched; it never
-> invents numbers, and if the AI call fails the app falls back to the rule-based
-> pick.
+> **It's free, and it's Groq (not OpenAI).** Get a free API key (no credit card)
+> from **[console.groq.com](https://console.groq.com)** → API Keys. Groq runs
+> fast open models (Llama 3.3 70B) at no cost. The AI only ever sees the
+> price/volume data the app already fetched; it never invents numbers, and if
+> the AI call fails the app falls back to the rule-based pick.
 
 To go live later, change `LIVE` to `"true"` in the Secrets box (the app shows a
 loud red warning in live mode).
