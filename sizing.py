@@ -53,6 +53,8 @@ def build_trade_plan(
     buying_power: float,
     risk_pct: float,
     max_order_dollars: float,
+    stop_atr_mult: float = STOP_ATR_MULT,
+    reward_risk: float = REWARD_RISK,
 ) -> TradePlan:
     """
     Turn a scored candidate into a full trade plan.
@@ -70,9 +72,9 @@ def build_trade_plan(
 
     # Volatility-based stop distance (with a minimum so it's never razor-thin).
     atr = score.atr if score.atr > 0 else entry * 0.01
-    risk_per_share = max(STOP_ATR_MULT * atr, entry * MIN_STOP_PCT)
+    risk_per_share = max(stop_atr_mult * atr, entry * MIN_STOP_PCT)
     stop = round(entry - risk_per_share, 2)
-    take_profit = round(entry + REWARD_RISK * risk_per_share, 2)
+    take_profit = round(entry + reward_risk * risk_per_share, 2)
     if stop <= 0:
         return _skip(score.symbol, "Stop-loss would be below zero.")
 

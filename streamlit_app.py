@@ -196,8 +196,10 @@ def build_trade():
     plan = build_trade_plan(
         score=candidate,
         buying_power=buying_power,
-        risk_pct=cfg.risk_pct,
-        max_order_dollars=cfg.max_order_dollars,
+        risk_pct=ss.risk_pct,
+        max_order_dollars=ss.max_order,
+        stop_atr_mult=ss.stop_mult,
+        reward_risk=ss.reward_risk,
     )
 
     # Remember this ticker so the next scan tends to pick something different.
@@ -304,32 +306,84 @@ def handle_command(text: str) -> None:
 # ===========================================================================
 # 2) CHAT SCREEN
 # ===========================================================================
+# Slider-controlled settings default from config on first load.
+ss.setdefault("risk_pct", cfg.risk_pct)
+ss.setdefault("max_order", cfg.max_order_dollars)
+ss.setdefault("stop_mult", 1.5)
+ss.setdefault("reward_risk", 2.0)
+
+# --- A little CSS polish (theme-aware) ---
+st.markdown("""
+<style>
+#MainMenu, footer, [data-testid="stToolbar"] {visibility:hidden;}
+.block-container {padding-top:1.2rem; max-width:760px;}
+.hdr {display:flex; align-items:center; justify-content:space-between;
+      background:linear-gradient(135deg,#0f766e,#0891b2);
+      color:#fff; padding:14px 18px; border-radius:16px; margin-bottom:.6rem;
+      box-shadow:0 4px 16px rgba(8,145,178,.25);}
+.hdr .t {font-size:1.15rem; font-weight:800; letter-spacing:.2px;}
+.pill {padding:4px 13px; border-radius:999px; font-weight:800; font-size:.72rem;
+       letter-spacing:.4px;}
+.pill.paper {background:#dcfce7; color:#166534;}
+.pill.live  {background:#fee2e2; color:#991b1b;}
+.stButton>button {border-radius:12px; font-weight:700; padding:.55rem 1rem;}
+[data-testid="stMetric"] {background:rgba(128,128,128,.08); padding:10px 12px;
+       border-radius:12px;}
+</style>
+""", unsafe_allow_html=True)
+
+# --- Header ---
+mode_cls = "live" if cfg.live else "paper"
+st.markdown(
+    f'<div class="hdr"><span class="t">📈 Alpaca Trading Bot</span>'
+    f'<span class="pill {mode_cls}">{cfg.mode_name}</span></div>',
+    unsafe_allow_html=True,
+)
 if cfg.live:
     st.error("⚠️ LIVE trading — orders use REAL money.")
-else:
-    st.title("📈 Alpaca Trading Bot")
-    st.caption("🟢 Paper mode — fake money, safe to experiment.")
 
-top = st.columns([3, 1])
-with top[0]:
-    try:
-        bp = float(broker.get_account().buying_power)
-        st.caption(f"Buying power: ${bp:,.0f}")
-    except BrokerError:
-        st.caption("Buying power: —")
-with top[1]:
-    if st.button("Disconnect"):
+# --- Account metrics ---
+try:
+    a = broker.get_account()
+    m = st.columns(3)
+    m[0].metric("Buying power", f"${float(a.buying_power):,.0f}")
+    m[1].metric("Cash", f"${float(a.cash):,.0f}")
+    m[2].metric("Portfolio", f"${float(a.portfolio_value):,.0f}")
+except BrokerError:
+    st.caption("Account: —")
+
+# --- Settings + disconnect ---
+with st.expander("⚙️ Trading settings"):
+    ss.risk_pct = st.slider(
+        "Risk per trade (% of buying power)", 0.25, 5.0,
+        float(ss.risk_pct * 100), 0.25,
+        help="How much of your account you're willing to lose if the stop hits. "
+             "Drives how many shares.") / 100
+    ss.max_order = float(st.slider(
+        "Max per order ($)", 500, 20000, int(ss.max_order), 500,
+        help="Hard ceiling on any single order."))
+    ss.stop_mult = st.slider(
+        "Stop distance (× ATR)", 1.0, 3.0, float(ss.stop_mult), 0.5,
+        help="Wider = more room, fewer shares. Tighter = less risk per share.")
+    ss.reward_risk = st.slider(
+        "Reward : Risk", 1.0, 4.0, float(ss.reward_risk), 0.5,
+        help="Take-profit distance as a multiple of the stop distance.")
+    st.caption(f"Now: risk {ss.risk_pct*100:.2f}% · max ${ss.max_order:,.0f} · "
+               f"stop {ss.stop_mult:g}×ATR · reward:risk 1:{ss.reward_risk:g}")
+    if st.button("Disconnect / change keys", use_container_width=True):
         for k in ("connected", "broker", "cfg", "groq_key", "pending"):
             ss[k] = False if k == "connected" else (None if k != "groq_key" else "")
         ss.messages = []
         st.rerun()
 
-# Render chat history.
-for m in ss.messages:
-    with st.chat_message(m["role"]):
-        st.markdown(m["content"])
+st.divider()
 
-# Yes/No buttons when a trade is waiting.
+# --- Chat history ---
+for msg in ss.messages:
+    with st.chat_message(msg["role"], avatar="📈" if msg["role"] == "assistant" else None):
+        st.markdown(msg["content"])
+
+# --- Yes/No buttons when a trade is waiting ---
 if ss.pending is not None:
     yn = st.columns(2)
     if yn[0].button("✅ Yes, place it", use_container_width=True, type="primary"):
@@ -340,7 +394,7 @@ if ss.pending is not None:
         say("assistant", "👍 Skipped. Type **find** whenever you want another.")
         st.rerun()
 
-# Chat input.
+# --- Chat input ---
 prompt = st.chat_input("Type 'find' to find a trade…")
 if prompt:
     handle_command(prompt)
