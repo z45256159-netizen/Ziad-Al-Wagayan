@@ -71,22 +71,24 @@ def verify_key(api_key: str, model: str = GROQ_MODEL) -> bool:
 
 
 def _build_messages(candidates: List[SymbolScore]) -> list:
-    lines = ["Candidates:"]
+    lines = ["Candidates (all already passed a trend + RSI + MACD + volume filter):"]
     for c in candidates:
         lines.append(
             f"- {c.symbol}: price ${c.last_price:.2f}, "
-            f"{c.momentum_strength * 100:.1f}% above its moving average, "
+            f"{c.momentum_strength * 100:.1f}% above its 20-day average, "
+            f"RSI {c.rsi:.0f}, MACD histogram {c.macd_hist:+.2f}, "
             f"volume {c.volume_ratio:.2f}x average, composite score {c.score:.4f}"
         )
     data = "\n".join(lines)
     system = (
         "You are a disciplined short-term trading assistant. You will be given "
-        "stock candidates that already PASSED a momentum + volume filter (price "
-        "above the moving average AND above-average volume today). Using ONLY the "
-        "numbers provided, pick the single best candidate for a short-term "
-        "momentum swing trade. Prefer strong momentum backed by genuinely heavy "
-        "volume; be wary of a big move on only slightly-above-average volume. "
-        "This is educational, not financial advice.\n\n"
+        "stock candidates that already PASSED a multi-indicator filter (uptrend "
+        "via moving-average crossover, RSI momentum, bullish MACD, and "
+        "above-average volume). Using ONLY the numbers provided, pick the single "
+        "best candidate for a short-term momentum swing trade. Favor strong, "
+        "volume-backed momentum with RSI that shows strength without being "
+        "overbought (very high RSI is a caution). This is educational, not "
+        "financial advice.\n\n"
         "Respond with ONLY a JSON object (no prose, no code fences) with exactly "
         "these keys:\n"
         '  "symbol": one of the candidate tickers,\n'

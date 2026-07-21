@@ -80,7 +80,7 @@ if not ss.connected:
                 live=live,
                 position_size_pct=float(_secret("POSITION_SIZE_PCT", "0.05")),
                 max_order_dollars=float(_secret("MAX_ORDER_DOLLARS", "1000")),
-                lookback_days=int(_secret("LOOKBACK_DAYS", "20")),
+                lookback_days=int(_secret("LOOKBACK_DAYS", "60")),
             )
         except (ConfigError, ValueError) as exc:
             st.error(f"Check your entries: {exc}")

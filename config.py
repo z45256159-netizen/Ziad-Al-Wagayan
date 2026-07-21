@@ -103,7 +103,8 @@ def load_config() -> Config:
         live=_get_bool("LIVE", default=False),
         position_size_pct=_get_float("POSITION_SIZE_PCT", default=0.05),
         max_order_dollars=_get_float("MAX_ORDER_DOLLARS", default=1000.0),
-        lookback_days=_get_int("LOOKBACK_DAYS", default=20),
+        # Enough daily bars for the 50-day SMA + MACD/RSI warmup.
+        lookback_days=_get_int("LOOKBACK_DAYS", default=60),
     )
 
 
