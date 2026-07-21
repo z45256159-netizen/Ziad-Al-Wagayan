@@ -63,9 +63,10 @@ if not ss.connected:
         alp_sec = st.text_input("Alpaca API secret", value=_secret("ALPACA_API_SECRET"),
                                 type="password")
 
-        st.markdown("**Groq key** — free AI (from console.groq.com). Optional.")
-        groq_key = st.text_input("Groq API key", value=_secret("GROQ_API_KEY"),
-                                 type="password")
+        st.markdown("**Groq key** — free AI that runs Llama (from "
+                    "console.groq.com). Optional.")
+        groq_key = st.text_input("Groq API key (free Llama AI)",
+                                 value=_secret("GROQ_API_KEY"), type="password")
 
         live = st.checkbox("⚠️ Live trading (REAL money)", value=False)
         submitted = st.form_submit_button("Connect", use_container_width=True,
