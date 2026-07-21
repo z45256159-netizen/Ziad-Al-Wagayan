@@ -123,6 +123,7 @@ class Broker:
                     volume=float(b.volume),
                     high=float(b.high),
                     low=float(b.low),
+                    open=float(b.open),
                 )
                 for b in recent
             ]

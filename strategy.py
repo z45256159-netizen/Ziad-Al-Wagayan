@@ -69,6 +69,7 @@ class Bar:
     volume: float
     high: Optional[float] = None
     low: Optional[float] = None
+    open: Optional[float] = None
 
 
 @dataclass

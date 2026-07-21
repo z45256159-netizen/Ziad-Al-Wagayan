@@ -17,6 +17,7 @@ import os
 import streamlit as st
 from ai import ai_choose, verify_key
 from broker import Broker, BrokerError
+from chart import make_position_chart, tradingview_url
 from config import Config, ConfigError
 from sizing import build_trade_plan
 from strategy import rank_candidates
@@ -32,6 +33,7 @@ ss.setdefault("broker", None)
 ss.setdefault("cfg", None)
 ss.setdefault("groq_key", "")
 ss.setdefault("recent", [])        # last few tickers suggested, for variety
+ss.setdefault("view", None)        # {plan, bars} for the chart of the latest pick
 
 
 def _secret(name: str, default: str = "") -> str:
@@ -148,6 +150,7 @@ cfg: Config = ss.cfg
 
 def build_trade():
     """Scan and pick one trade. Returns (assistant_text, pending_dict_or_None)."""
+    ss.view = None  # clear any previous chart until we have a fresh plan
     try:
         market_open = broker.is_market_open()
     except BrokerError:
@@ -232,8 +235,14 @@ def build_trade():
         f"profit **${plan.reward_total:,.2f}** if it hits\n"
         f"- ⚖️ Risk/reward: **1 : {plan.rr_ratio:g}**"
     )
+    parts.append(f"📈 **[Open {plan.symbol} on TradingView]"
+                 f"({tradingview_url(plan.symbol)})** — the chart with your "
+                 "levels is drawn below.")
     parts.append("Place it? Tap **✅ Yes** or **❌ No** below (or type yes / no). "
                  "The stop-loss and take-profit are placed automatically with it.")
+
+    # Stash the chart (last ~40 bars of the chosen ticker) for rendering.
+    ss.view = {"plan": plan, "bars": bars[candidate.symbol][-40:]}
     return "\n\n".join(parts), {"plan": plan, "ai": ai}
 
 
@@ -409,6 +418,16 @@ st.divider()
 for msg in ss.messages:
     with st.chat_message(msg["role"], avatar="📈" if msg["role"] == "assistant" else None):
         st.markdown(msg["content"])
+
+# --- Chart of the latest pick (entry / stop / target drawn on candles) ---
+view = ss.get("view")
+if view:
+    fig = make_position_chart(view["bars"], view["plan"])
+    if fig is not None:
+        st.plotly_chart(fig, use_container_width=True)
+        st.link_button("📈 Open on TradingView",
+                       tradingview_url(view["plan"].symbol),
+                       use_container_width=True)
 
 # --- Yes/No buttons when a trade is waiting ---
 if ss.pending is not None:
