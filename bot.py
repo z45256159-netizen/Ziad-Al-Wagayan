@@ -23,10 +23,13 @@ import sys
 from alpaca.trading.enums import OrderSide
 
 from broker import Broker, BrokerError
-from config import CONFIG, ConfigError
+from config import load_config, ConfigError
 from sizing import size_position
 from strategy import find_candidate
 from universe import UNIVERSE
+
+# Populated in main() at startup. Command functions read it at call time.
+CONFIG = None
 
 
 # --------------------------------------------------------------------------- UI
@@ -207,6 +210,8 @@ def cmd_scan(broker: Broker) -> None:
 
 # ------------------------------------------------------------------------- loop
 def main() -> int:
+    global CONFIG
+    CONFIG = load_config()
     print_mode_banner()
 
     try:

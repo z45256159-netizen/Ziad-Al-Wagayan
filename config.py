@@ -107,6 +107,7 @@ def load_config() -> Config:
     )
 
 
-# Singleton used throughout the app. Loading here means an invalid config
-# raises immediately on import, before we touch the market.
-CONFIG = load_config()
+# Note: we intentionally do NOT build a singleton at import time. The CLI
+# (bot.py) calls load_config() at startup, and the web app (streamlit_app.py)
+# builds a Config from its own secrets store. This keeps `import config` free of
+# side effects so either front-end can use it.

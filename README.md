@@ -74,7 +74,46 @@ Your `.env` is git-ignored, so your keys won't be committed.
 
 ---
 
-## Running (paper mode)
+## 🌐 The website (phone-friendly) — recommended
+
+There's a web version (`streamlit_app.py`) with **Scan / Place Order / Balance /
+Positions** buttons that works great on a phone. Deploy it free once and you get
+a permanent URL you just open in your browser.
+
+> Why does it need hosting instead of being a plain link? Because it talks to
+> your real brokerage account. Your secret key must live on a server (never in a
+> public page), and the server is what reaches Alpaca. Hosting is free.
+
+### Deploy free on Streamlit Community Cloud (~3 minutes)
+
+1. Push this repo to your own GitHub (this branch already is).
+2. Go to **[share.streamlit.io](https://share.streamlit.io)** and sign in with
+   GitHub.
+3. Click **Create app** → pick this repo, your branch, and
+   `streamlit_app.py` as the main file.
+4. Open **Advanced settings → Secrets** and paste (using your **paper** keys):
+   ```toml
+   ALPACA_API_KEY = "PK...your paper key..."
+   ALPACA_API_SECRET = "...your paper secret..."
+   LIVE = "false"
+   ```
+5. Click **Deploy**. You'll get a URL like `https://your-app.streamlit.app` —
+   bookmark it on your phone. Done.
+
+To go live later, change `LIVE` to `"true"` in the Secrets box (the app shows a
+loud red warning in live mode).
+
+### Run the website locally
+
+```bash
+pip install -r requirements.txt
+cp .streamlit/secrets.toml.example .streamlit/secrets.toml   # then edit in your keys
+streamlit run streamlit_app.py
+```
+
+---
+
+## Running the CLI (paper mode)
 
 ```bash
 python bot.py
