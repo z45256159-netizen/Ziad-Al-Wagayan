@@ -49,11 +49,68 @@ def say(role: str, content: str) -> None:
 
 
 # ===========================================================================
-# 1) CONNECT SCREEN — paste keys, verify they work
+# 1) CONNECT — auto-connect from saved Secrets, else show a one-time form
 # ===========================================================================
+def _connect(alp_key, alp_sec, groq_key, live, verify_groq=True):
+    """Returns (ok, error_message). On success, stores everything in session."""
+    try:
+        cfg = Config(
+            api_key=alp_key.strip(),
+            api_secret=alp_sec.strip(),
+            live=live,
+            position_size_pct=float(_secret("POSITION_SIZE_PCT", "0.05")),
+            max_order_dollars=float(_secret("MAX_ORDER_DOLLARS", "2000")),
+            lookback_days=int(_secret("LOOKBACK_DAYS", "60")),
+            risk_pct=float(_secret("RISK_PCT", "0.01")),
+        )
+    except (ConfigError, ValueError) as exc:
+        return False, f"Check your entries: {exc}"
+
+    try:
+        broker = Broker(cfg)
+        broker.get_account()
+    except BrokerError as exc:
+        return False, f"Alpaca keys didn't work: {exc}"
+
+    gk = groq_key.strip()
+    groq_msg = "No AI key — the built-in scanner will decide trades."
+    if gk:
+        if not verify_groq or verify_key(gk):
+            groq_msg = "🤖 Groq AI connected — it will pick and explain trades."
+        else:
+            gk = ""
+            groq_msg = "⚠️ That Groq key didn't work, so the built-in scanner will decide."
+
+    ss.broker, ss.cfg, ss.groq_key = broker, cfg, gk
+    ss.connected, ss.messages, ss.pending = True, [], None
+    say("assistant",
+        f"✅ Connected to Alpaca ({cfg.mode_name}). {groq_msg}\n\n"
+        f"Type **find** to find a trade. You can also type **balance** or "
+        f"**positions**.")
+    return True, None
+
+
+def _live_flag() -> bool:
+    return _secret("LIVE", "false").strip().lower() in ("1", "true", "yes", "on")
+
+
+if not ss.connected:
+    # Auto-connect if keys are saved in Secrets — so you never retype them.
+    saved_key = _secret("ALPACA_API_KEY").strip()
+    saved_sec = _secret("ALPACA_API_SECRET").strip()
+    if saved_key and saved_sec and not ss.get("auto_tried"):
+        ss.auto_tried = True
+        with st.spinner("Connecting…"):
+            ok, _err = _connect(saved_key, saved_sec, _secret("GROQ_API_KEY"),
+                                _live_flag())
+        if ok:
+            st.rerun()
+
 if not ss.connected:
     st.title("📈 Alpaca Trading Bot")
-    st.caption("Paste your keys to start. They stay in this browser session only.")
+    st.caption("Enter your keys once. Tip: to skip this screen forever, save them "
+               "in the app's **Settings → Secrets** (see the README) and it will "
+               "auto-connect every time.")
 
     with st.form("connect"):
         st.markdown("**Alpaca keys** (from app.alpaca.markets → Paper Trading)")
@@ -61,65 +118,23 @@ if not ss.connected:
                                 type="password")
         alp_sec = st.text_input("Alpaca API secret", value=_secret("ALPACA_API_SECRET"),
                                 type="password")
-
         st.markdown("**Groq key** — free AI that runs Llama (from "
                     "console.groq.com). Optional.")
         groq_key = st.text_input("Groq API key (free Llama AI)",
                                  value=_secret("GROQ_API_KEY"), type="password")
-
-        live = st.checkbox("⚠️ Live trading (REAL money)", value=False)
+        live = st.checkbox("⚠️ Live trading (REAL money)", value=_live_flag())
         submitted = st.form_submit_button("Connect", use_container_width=True,
                                           type="primary")
 
     if submitted:
-        try:
-            cfg = Config(
-                api_key=alp_key.strip(),
-                api_secret=alp_sec.strip(),
-                live=live,
-                position_size_pct=float(_secret("POSITION_SIZE_PCT", "0.05")),
-                max_order_dollars=float(_secret("MAX_ORDER_DOLLARS", "2000")),
-                lookback_days=int(_secret("LOOKBACK_DAYS", "60")),
-                risk_pct=float(_secret("RISK_PCT", "0.01")),
-            )
-        except (ConfigError, ValueError) as exc:
-            st.error(f"Check your entries: {exc}")
-            st.stop()
-
-        # Verify Alpaca keys by fetching the account.
-        with st.spinner("Checking your Alpaca keys…"):
-            try:
-                broker = Broker(cfg)
-                acct = broker.get_account()
-            except BrokerError as exc:
-                st.error(f"❌ Alpaca keys didn't work: {exc}")
-                st.info("Make sure they're **paper** keys and 'Live trading' is "
-                        "unchecked (or use live keys with it checked).")
-                st.stop()
-
-        # Verify Groq key if one was entered.
-        groq_msg = "No AI key — the built-in scanner will decide trades."
-        gk = groq_key.strip()
-        if gk:
-            with st.spinner("Checking your Groq AI key…"):
-                if verify_key(gk):
-                    groq_msg = "🤖 Groq AI connected — it will pick and explain trades."
-                else:
-                    gk = ""
-                    groq_msg = "⚠️ That Groq key didn't work, so the built-in " \
-                               "scanner will decide trades. (You can reconnect later.)"
-
-        ss.broker = broker
-        ss.cfg = cfg
-        ss.groq_key = gk
-        ss.connected = True
-        ss.messages = []
-        ss.pending = None
-        say("assistant",
-            f"✅ Connected to Alpaca ({cfg.mode_name}). {groq_msg}\n\n"
-            f"Type **find** to find a trade. You can also type **balance** or "
-            f"**positions**.")
-        st.rerun()
+        with st.spinner("Checking your keys…"):
+            ok, err = _connect(alp_key, alp_sec, groq_key, live)
+        if ok:
+            st.rerun()
+        else:
+            st.error(f"❌ {err}")
+            st.info("Make sure they're **paper** keys and 'Live trading' is "
+                    "unchecked (or use live keys with it checked).")
 
     st.stop()
 

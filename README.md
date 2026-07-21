@@ -102,10 +102,20 @@ browser; after that there's no more setup — open the link, paste keys, chat.
 5. Open the link and **paste your keys in the app** — Alpaca key + secret, and
    (optionally) your free Groq key. The app checks them, then you chat.
 
-> You do **not** need to put keys in Streamlit's Secrets box — the app asks for
-> them on screen. (If you'd rather pre-fill them so you don't retype each visit,
-> you *can* add `ALPACA_API_KEY`, `ALPACA_API_SECRET`, `LIVE`, and `GROQ_API_KEY`
-> under **Advanced settings → Secrets** — they'll auto-fill the form.)
+### Never type your keys again (recommended)
+
+Save them **once** in your app's Secrets and the app **auto-connects** every
+visit — straight to the chat, no form:
+
+1. On your deployed app tap **⋮ → Settings → Secrets** (or **Manage app → Secrets**).
+2. Paste this (with your real keys) and **Save**:
+   ```toml
+   ALPACA_API_KEY = "PK...your paper key..."
+   ALPACA_API_SECRET = "...your paper secret..."
+   LIVE = "false"
+   GROQ_API_KEY = "gsk_...your free Groq key..."
+   ```
+3. Reopen the app — it connects automatically and drops you in the chat.
 
 ### 🧠 The bot already has a brain (no AI needed)
 
