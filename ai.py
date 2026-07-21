@@ -1,42 +1,45 @@
 """
-Optional AI layer — a Claude "second opinion" on the scan.
+Optional AI layer — a FREE "second opinion" on the scan.
 
-This is OFF unless an Anthropic API key is provided (ANTHROPIC_API_KEY). When
-present, we hand Claude the real numbers the scanner computed for the top few
-candidates and ask it to pick the single best short-term trade and explain why.
+This is OFF unless you provide a free API key. It uses providers that expose the
+standard OpenAI-compatible chat API, so no paid service and no extra Python
+packages are required (calls go out via the standard library).
 
-IMPORTANT: Claude only ever sees the data WE fetched from Alpaca — it does not
-invent prices. If the AI call fails for any reason, the app silently falls back
-to the rule-based pick, so this can never break scanning.
+Get a FREE key (no credit card):
+  * Groq        -> https://console.groq.com   (fast; set GROQ_API_KEY)        [default]
+  * OpenRouter  -> https://openrouter.ai       (free models; OPENROUTER_API_KEY)
 
-Note on credentials: an Anthropic API key (console.anthropic.com) is separate
-from a Claude Pro subscription. Pro is the chat product; the API is billed on
-its own. A scan costs a fraction of a cent.
+When enabled, the app hands the AI the real numbers the scanner computed for the
+top candidates and asks it to pick the single best short-term trade and explain
+why. The AI only ever sees data WE fetched from Alpaca — it never invents prices.
+If the call fails for any reason, the app silently falls back to the rule-based
+pick, so this can never break scanning.
 """
 
 from __future__ import annotations
 
 import json
+import re
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from typing import List, Optional
 
 from strategy import SymbolScore
 
-# Current, most capable Claude model. Change here if you prefer another.
-DEFAULT_MODEL = "claude-opus-4-8"
-
-# JSON shape we ask Claude to return, enforced via structured outputs.
-_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "symbol": {"type": "string"},
-        "recommendation": {"type": "string", "enum": ["GO", "CAUTION", "NO-GO"]},
-        "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
-        "rationale": {"type": "string"},
+# Free, OpenAI-compatible providers. `model` is a sensible free default per
+# provider — override with the AI_MODEL secret if you like.
+PROVIDERS = {
+    "groq": {
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "model": "llama-3.3-70b-versatile",
     },
-    "required": ["symbol", "recommendation", "confidence", "rationale"],
-    "additionalProperties": False,
+    "openrouter": {
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "model": "meta-llama/llama-3.3-70b-instruct:free",
+    },
 }
+DEFAULT_PROVIDER = "groq"
 
 
 @dataclass
@@ -47,68 +50,98 @@ class AIResult:
     rationale: str
 
 
-def _build_prompt(candidates: List[SymbolScore]) -> str:
-    lines = [
-        "You are a disciplined short-term trading assistant. Below are stock "
-        "candidates that already PASSED a momentum + volume filter (price above "
-        "the N-day moving average AND above-average volume today). Using ONLY "
-        "the numbers provided — do not assume any other data — pick the single "
-        "best candidate for a short-term momentum swing trade.",
-        "",
-        "Candidates:",
-    ]
+def _build_messages(candidates: List[SymbolScore]) -> list:
+    lines = ["Candidates:"]
     for c in candidates:
         lines.append(
             f"- {c.symbol}: price ${c.last_price:.2f}, "
             f"{c.momentum_strength * 100:.1f}% above its moving average, "
             f"volume {c.volume_ratio:.2f}x average, composite score {c.score:.4f}"
         )
-    lines += [
-        "",
-        "Prefer strong momentum backed by genuinely heavy volume; be wary of a "
-        "big move on only slightly-above-average volume. Give one clear pick, a "
-        "GO/CAUTION/NO-GO recommendation, your confidence, and a one- or "
-        "two-sentence rationale a beginner can follow. This is educational, not "
-        "financial advice.",
+    data = "\n".join(lines)
+    system = (
+        "You are a disciplined short-term trading assistant. You will be given "
+        "stock candidates that already PASSED a momentum + volume filter (price "
+        "above the moving average AND above-average volume today). Using ONLY the "
+        "numbers provided, pick the single best candidate for a short-term "
+        "momentum swing trade. Prefer strong momentum backed by genuinely heavy "
+        "volume; be wary of a big move on only slightly-above-average volume. "
+        "This is educational, not financial advice.\n\n"
+        "Respond with ONLY a JSON object (no prose, no code fences) with exactly "
+        "these keys:\n"
+        '  "symbol": one of the candidate tickers,\n'
+        '  "recommendation": one of "GO", "CAUTION", "NO-GO",\n'
+        '  "confidence": one of "low", "medium", "high",\n'
+        '  "rationale": one or two sentences a beginner can follow.'
+    )
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": data},
     ]
-    return "\n".join(lines)
+
+
+def _extract_json(text: str) -> Optional[dict]:
+    """Parse the first JSON object out of the model's reply, tolerantly."""
+    try:
+        return json.loads(text)
+    except Exception:
+        match = re.search(r"\{.*\}", text, re.DOTALL)
+        if not match:
+            return None
+        try:
+            return json.loads(match.group(0))
+        except Exception:
+            return None
 
 
 def ai_choose(
     candidates: List[SymbolScore],
     api_key: str,
-    model: str = DEFAULT_MODEL,
+    provider: str = DEFAULT_PROVIDER,
+    model: Optional[str] = None,
 ) -> Optional[AIResult]:
     """
-    Ask Claude to pick the best candidate. Returns an AIResult, or None if the
-    call fails or the SDK isn't available (caller then falls back to the
-    rule-based pick).
+    Ask a free LLM to pick the best candidate. Returns an AIResult, or None if
+    the call fails (caller then falls back to the rule-based pick).
     """
     if not candidates or not api_key:
         return None
 
-    try:
-        import anthropic
-    except ImportError:
+    cfg = PROVIDERS.get(provider)
+    if cfg is None:
         return None
 
+    payload = {
+        "model": model or cfg["model"],
+        "messages": _build_messages(candidates),
+        "temperature": 0.2,
+        "max_tokens": 400,
+        "response_format": {"type": "json_object"},
+    }
+
+    request = urllib.request.Request(
+        cfg["url"],
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
     try:
-        client = anthropic.Anthropic(api_key=api_key)
-        response = client.messages.create(
-            model=model,
-            max_tokens=1024,
-            output_config={"format": {"type": "json_schema", "schema": _SCHEMA}},
-            messages=[{"role": "user", "content": _build_prompt(candidates)}],
-        )
-        # With output_config.format the first text block is guaranteed valid JSON.
-        text = next((b.text for b in response.content if b.type == "text"), "")
-        data = json.loads(text)
+        with urllib.request.urlopen(request, timeout=30) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+        content = body["choices"][0]["message"]["content"]
+        data = _extract_json(content)
+        if not data:
+            return None
         return AIResult(
-            symbol=data["symbol"],
-            recommendation=data["recommendation"],
-            confidence=data["confidence"],
-            rationale=data["rationale"],
+            symbol=str(data["symbol"]).upper(),
+            recommendation=str(data.get("recommendation", "CAUTION")).upper(),
+            confidence=str(data.get("confidence", "medium")).lower(),
+            rationale=str(data.get("rationale", "")).strip(),
         )
-    except Exception:
-        # Any failure (bad key, network, older SDK, refusal) -> fall back cleanly.
+    except (urllib.error.URLError, KeyError, ValueError, TimeoutError):
+        # Bad key, network issue, rate limit, unexpected shape -> clean fallback.
         return None

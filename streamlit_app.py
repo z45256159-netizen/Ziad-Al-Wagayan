@@ -110,7 +110,7 @@ if "candidate" not in st.session_state:
     st.session_state.candidate = None
 
 
-def run_scan(use_ai: bool, ai_key: str) -> None:
+def run_scan(use_ai: bool, ai_key: str, ai_provider: str) -> None:
     """Scan the universe and stash the top tradeable candidate in session state."""
     st.session_state.candidate = None
     with st.spinner(f"Scanning {len(UNIVERSE)} tickers…"):
@@ -154,8 +154,8 @@ def run_scan(use_ai: bool, ai_key: str) -> None:
     candidate = tradeable[0]
     ai_result = None
     if use_ai and ai_key:
-        with st.spinner("Asking Claude for a second opinion…"):
-            ai_result = ai_choose(tradeable[:6], ai_key)
+        with st.spinner("Asking the AI for a second opinion…"):
+            ai_result = ai_choose(tradeable[:6], ai_key, provider=ai_provider)
         if ai_result is not None:
             match = next((c for c in tradeable if c.symbol == ai_result.symbol), None)
             if match is not None:
@@ -176,22 +176,32 @@ def run_scan(use_ai: bool, ai_key: str) -> None:
     st.session_state.candidate = {"c": candidate, "s": sizing, "ai": ai_result}
 
 
-# --- AI toggle (only meaningful when an Anthropic API key is configured) ---
-ai_key = _secret("ANTHROPIC_API_KEY").strip()
+# --- AI toggle (uses a FREE provider key if one is configured) ---
+# Groq is the default (free, fast, no credit card); OpenRouter is a free backup.
+groq_key = _secret("GROQ_API_KEY").strip()
+openrouter_key = _secret("OPENROUTER_API_KEY").strip()
+if groq_key:
+    ai_provider, ai_key = "groq", groq_key
+elif openrouter_key:
+    ai_provider, ai_key = "openrouter", openrouter_key
+else:
+    ai_provider, ai_key = "groq", ""
+
 if ai_key:
-    use_ai = st.toggle("🤖 Let Claude AI pick the trade", value=True,
-                       help="Claude reviews the top candidates' real numbers and "
+    use_ai = st.toggle("🤖 Let the AI pick the trade (free)", value=True,
+                       help="The AI reviews the top candidates' real numbers and "
                             "chooses one, with a plain-English rationale.")
 else:
     use_ai = False
-    st.caption("💡 Add an `ANTHROPIC_API_KEY` (from console.anthropic.com) in "
-               "Secrets to have Claude AI pick and explain the trade. Without it, "
-               "the rule-based momentum + volume scanner runs on its own.")
+    st.caption("💡 Add a **free** `GROQ_API_KEY` (from console.groq.com — no "
+               "credit card) in Secrets to have the AI pick and explain the "
+               "trade. Without it, the rule-based momentum + volume scanner "
+               "runs on its own.")
 
 # --- Action buttons ---
 b1, b2 = st.columns(2)
 if b1.button("🔍 Scan for a trade", use_container_width=True, type="primary"):
-    run_scan(use_ai, ai_key)
+    run_scan(use_ai, ai_key, ai_provider)
 if b2.button("🔄 Clear", use_container_width=True):
     st.session_state.candidate = None
 
@@ -209,7 +219,7 @@ if stash:
     if ai is not None:
         badge = {"GO": "🟢", "CAUTION": "🟡", "NO-GO": "🔴"}.get(ai.recommendation, "🤖")
         st.markdown(
-            f"**🤖 Claude's take — {badge} {ai.recommendation}** "
+            f"**🤖 AI's take — {badge} {ai.recommendation}** "
             f"(confidence: {ai.confidence})\n\n{ai.rationale}"
         )
 

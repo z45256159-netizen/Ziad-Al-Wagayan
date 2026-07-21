@@ -96,26 +96,36 @@ a permanent URL you just open in your browser.
    ALPACA_API_KEY = "PK...your paper key..."
    ALPACA_API_SECRET = "...your paper secret..."
    LIVE = "false"
-   # Optional — turns on the Claude AI pick (see below):
-   # ANTHROPIC_API_KEY = "sk-ant-..."
+   # Optional — turns on the FREE AI pick (see below):
+   # GROQ_API_KEY = "gsk_..."
    ```
 5. Click **Deploy**. You'll get a URL like `https://your-app.streamlit.app` —
    bookmark it on your phone. Done.
 
-### 🤖 Optional: let Claude AI pick the trade
+### 🧠 The bot already has a brain (no AI needed)
 
-If you add an `ANTHROPIC_API_KEY` to the secrets, a **"Let Claude AI pick the
-trade"** toggle appears. When on, the scanner still finds the qualifying
-candidates, then Claude reviews their real numbers, chooses one, and shows a
-plain-English GO / CAUTION / NO-GO rationale. Without the key, the rule-based
-momentum + volume scanner runs on its own — the app works fully either way.
+The **momentum + volume scanner is the decision-maker** — it picks the trade,
+sizes it, and skips tickers you already hold, entirely on its own. You can trade
+with it and never turn on any AI. The AI below is an optional *second opinion*.
 
-> **Important:** an Anthropic API key is **not** the same as a Claude Pro
-> subscription. Pro is the chat product at claude.ai; the API is a separate,
-> pay-as-you-go developer service. Get a key at **console.anthropic.com** and
-> add a few dollars of credit — each scan costs a fraction of a cent. Claude
-> only ever sees the price/volume data the app already fetched; it never invents
-> numbers, and if the AI call fails the app falls back to the rule-based pick.
+### 🤖 Optional: let a FREE AI pick the trade
+
+If you add a `GROQ_API_KEY` to the secrets, a **"Let the AI pick the trade"**
+toggle appears. When on, the scanner still finds the qualifying candidates, then
+the AI reviews their real numbers, chooses one, and shows a plain-English
+GO / CAUTION / NO-GO rationale. Without the key, the rule-based scanner runs on
+its own — the app works fully either way.
+
+> **It's free.** Get a **free** API key (no credit card) from
+> **[console.groq.com](https://console.groq.com)** and paste it as `GROQ_API_KEY`.
+> Groq runs fast open models (Llama 3.3 70B) at no cost. Prefer a different free
+> provider? Set `OPENROUTER_API_KEY` instead (from
+> [openrouter.ai](https://openrouter.ai)) — the app uses it automatically if no
+> Groq key is present.
+>
+> The AI only ever sees the price/volume data the app already fetched; it never
+> invents numbers, and if the AI call fails the app falls back to the rule-based
+> pick.
 
 To go live later, change `LIVE` to `"true"` in the Secrets box (the app shows a
 loud red warning in live mode).
