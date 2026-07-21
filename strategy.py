@@ -227,3 +227,56 @@ def find_candidate(bars_by_symbol: dict[str, List[Bar]]) -> Optional[SymbolScore
     """Return the single best candidate, or None if nothing passes the filters."""
     ranked = rank_candidates(bars_by_symbol)
     return ranked[0] if ranked else None
+
+
+def score_relaxed(symbol: str, bars: List[Bar]) -> Optional[SymbolScore]:
+    """
+    A NON-rejecting scorer: computes the same indicators but never filters a
+    stock out. Used as a fallback so the bot can always surface *something* to
+    look at (for practice) when nothing meets the strict setup. The `reason`
+    spells out which checks passed and which didn't.
+    """
+    if len(bars) < MIN_BARS:
+        return None
+    closes = [b.close for b in bars]
+    volumes = [b.volume for b in bars]
+    last_price = closes[-1]
+    sma_fast = _sma(closes[-SMA_FAST:])
+    sma_slow = _sma(closes[-SMA_SLOW:])
+    avg_volume = _sma(volumes[-VOLUME_PERIOD:])
+    today_volume = volumes[-1]
+    if sma_fast <= 0 or sma_slow <= 0 or avg_volume <= 0:
+        return None
+
+    momentum_strength = (last_price - sma_fast) / sma_fast
+    volume_ratio = today_volume / avg_volume
+    rsi = _rsi(closes)
+    macd_hist = _macd_hist(closes)
+    atr = _atr(bars)
+
+    # Soft score: mostly momentum, nudged by volume.
+    score = momentum_strength + 0.1 * (volume_ratio - 1.0)
+
+    checks = [
+        "✓ uptrend" if (last_price > sma_fast > sma_slow) else "✗ weak trend",
+        f"RSI {rsi:.0f}",
+        "MACD bullish" if macd_hist > 0 else "MACD bearish",
+        f"vol {volume_ratio:.2f}x",
+    ]
+    reason = ("Closest match (not a full setup) — " + ", ".join(checks) +
+              f". ATR ${atr:.2f}.")
+
+    return SymbolScore(
+        symbol=symbol, score=score, last_price=last_price, sma=sma_fast,
+        momentum_strength=momentum_strength, volume_ratio=volume_ratio,
+        rsi=rsi, macd_hist=macd_hist, atr=atr, reason=reason,
+    )
+
+
+def rank_relaxed(bars_by_symbol: dict[str, List[Bar]]) -> List[SymbolScore]:
+    """Score every symbol without filtering; best-first. Never empty if there's
+    data — the safety net so `find` always has something to show."""
+    scored = [score_relaxed(s, b) for s, b in bars_by_symbol.items()]
+    scored = [x for x in scored if x is not None]
+    scored.sort(key=lambda s: s.score, reverse=True)
+    return scored

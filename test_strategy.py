@@ -8,7 +8,7 @@ These run WITHOUT any API keys or network access:
 import unittest
 
 from sizing import build_trade_plan, size_position
-from strategy import Bar, find_candidate, score_symbol
+from strategy import Bar, find_candidate, rank_candidates, rank_relaxed, score_symbol
 
 
 def _bars(closes, volumes):
@@ -64,6 +64,17 @@ class TestScoring(unittest.TestCase):
         closes = [100 + i for i in range(10)]
         volumes = [1000] * 10
         self.assertIsNone(score_symbol("SHORT", _bars(closes, volumes)))
+
+    def test_relaxed_returns_something_when_strict_is_empty(self):
+        # A downtrend passes NO strict filters, but the relaxed fallback still
+        # ranks it so the user always has something to look at.
+        closes = [160 - i for i in range(60)]
+        volumes = [2000] * 60
+        book = {"DOWN": _bars(closes, volumes)}
+        self.assertEqual(rank_candidates(book), [])      # strict: nothing
+        relaxed = rank_relaxed(book)
+        self.assertEqual(len(relaxed), 1)                # fallback: one result
+        self.assertIn("not a full setup", relaxed[0].reason)
 
     def test_find_candidate_picks_highest_score(self):
         closes = _uptrend_closes()

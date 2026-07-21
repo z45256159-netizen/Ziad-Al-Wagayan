@@ -20,7 +20,7 @@ from broker import Broker, BrokerError
 from chart import make_position_chart, tradingview_url
 from config import Config, ConfigError
 from sizing import build_trade_plan
-from strategy import rank_candidates
+from strategy import rank_candidates, rank_relaxed
 from universe import UNIVERSE
 
 st.set_page_config(page_title="Alpaca Trading Bot", page_icon="📈", layout="centered")
@@ -226,9 +226,15 @@ def build_trade():
         return "No market data came back. Try again in a moment.", None
 
     ranked = rank_candidates(bars)
+    relaxed_mode = False
     if not ranked:
-        return ("No stock passed the trend + RSI + MACD + volume filters right "
-                "now — nothing worth trading. Try again later."), None
+        # Fallback for practice: show the strongest available even if it doesn't
+        # meet the full setup, clearly labeled.
+        ranked = rank_relaxed(bars)
+        relaxed_mode = True
+    if not ranked:
+        return ("Couldn't score any stock (not enough price history). "
+                "Try again in a moment."), None
 
     try:
         held = broker.held_symbols()
@@ -272,6 +278,11 @@ def build_trade():
 
     # ---- Build the full, trader-style message ----
     parts = [f"### 📊 {candidate.symbol} @ ${plan.entry:,.2f}"]
+    if relaxed_mode:
+        parts.append("⚠️ **No stock met all 4 filters right now** (often the case "
+                     "when the market is closed or flat). Here's the strongest "
+                     "candidate so you can still practice — treat it as a "
+                     "**demo**, not a green-light signal.")
     parts.append(f"**Why this stock:** {candidate.reason}")
     parts.append("**Strategy:** moving-average crossover (20 vs 50) + RSI + MACD "
                  "+ volume — a momentum setup that only fires when trend, "
