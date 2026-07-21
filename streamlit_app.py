@@ -96,8 +96,51 @@ def _live_flag() -> bool:
     return _secret("LIVE", "false").strip().lower() in ("1", "true", "yes", "on")
 
 
+# --- "Remember me on this device" via browser localStorage (best-effort) ---
+def _local_storage():
+    """Return a LocalStorage handle, or None if the component isn't available.
+    Everything here is wrapped so a failure never breaks the app."""
+    try:
+        from streamlit_local_storage import LocalStorage
+        return LocalStorage()
+    except Exception:
+        return None
+
+
+def ls_get(ls, name: str) -> str:
+    if ls is None:
+        return ""
+    try:
+        return (ls.getItem(name) or "").strip()
+    except Exception:
+        return ""
+
+
+def ls_save(ls, alp_key: str, alp_sec: str, groq_key: str, live: bool) -> None:
+    if ls is None:
+        return
+    try:
+        ls.setItem("ALPACA_API_KEY", alp_key, key="ls_ak")
+        ls.setItem("ALPACA_API_SECRET", alp_sec, key="ls_as")
+        ls.setItem("GROQ_API_KEY", groq_key, key="ls_gk")
+        ls.setItem("LIVE", "true" if live else "false", key="ls_lv")
+    except Exception:
+        pass
+
+
+def ls_clear(ls) -> None:
+    if ls is None:
+        return
+    for name, wk in (("ALPACA_API_KEY", "d_ak"), ("ALPACA_API_SECRET", "d_as"),
+                     ("GROQ_API_KEY", "d_gk"), ("LIVE", "d_lv")):
+        try:
+            ls.deleteItem(name, key=wk)
+        except Exception:
+            pass
+
+
 if not ss.connected:
-    # Auto-connect if keys are saved in Secrets — so you never retype them.
+    # 1) Auto-connect from Secrets (instant, reliable) if present.
     saved_key = _secret("ALPACA_API_KEY").strip()
     saved_sec = _secret("ALPACA_API_SECRET").strip()
     if saved_key and saved_sec and not ss.get("auto_tried"):
@@ -108,11 +151,25 @@ if not ss.connected:
         if ok:
             st.rerun()
 
+    # 2) Otherwise auto-connect from this device's saved keys (Remember me).
+    # One LocalStorage handle per run (its constructor uses a fixed widget key).
+    _ls = _local_storage()
+    if not ss.connected and not ss.get("ls_tried"):
+        rk, rs = ls_get(_ls, "ALPACA_API_KEY"), ls_get(_ls, "ALPACA_API_SECRET")
+        # Only mark "tried" once the browser has actually returned the keys —
+        # on the first render storage may still be loading.
+        if rk and rs:
+            ss.ls_tried = True
+            with st.spinner("Connecting…"):
+                ok, _err = _connect(rk, rs, ls_get(_ls, "GROQ_API_KEY"),
+                                    ls_get(_ls, "LIVE") == "true")
+            if ok:
+                st.rerun()
+
 if not ss.connected:
     st.title("📈 Alpaca Trading Bot")
-    st.caption("Enter your keys once. Tip: to skip this screen forever, save them "
-               "in the app's **Settings → Secrets** (see the README) and it will "
-               "auto-connect every time.")
+    st.caption("Enter your keys once. Tick **Remember me** and this device won't "
+               "ask again.")
 
     with st.form("connect"):
         st.markdown("**Alpaca keys** (from app.alpaca.markets → Paper Trading)")
@@ -125,6 +182,7 @@ if not ss.connected:
         groq_key = st.text_input("Groq API key (free Llama AI)",
                                  value=_secret("GROQ_API_KEY"), type="password")
         live = st.checkbox("⚠️ Live trading (REAL money)", value=_live_flag())
+        remember = st.checkbox("💾 Remember me on this device", value=True)
         submitted = st.form_submit_button("Connect", use_container_width=True,
                                           type="primary")
 
@@ -132,6 +190,10 @@ if not ss.connected:
         with st.spinner("Checking your keys…"):
             ok, err = _connect(alp_key, alp_sec, groq_key, live)
         if ok:
+            if remember:
+                # Reuse the same handle created above (don't build a second one).
+                ls_save(_ls, alp_key.strip(), alp_sec.strip(),
+                        groq_key.strip(), live)
             st.rerun()
         else:
             st.error(f"❌ {err}")
@@ -407,9 +469,12 @@ with st.expander("⚙️ Trading settings"):
         else:
             st.info("Auto mode is ON (paper). Type **find** and it trades on its own.")
     if st.button("Disconnect / change keys", use_container_width=True):
+        ls_clear(_local_storage())   # forget saved keys on this device
         for k in ("connected", "broker", "cfg", "groq_key", "pending"):
             ss[k] = False if k == "connected" else (None if k != "groq_key" else "")
         ss.messages = []
+        ss.auto_tried = False
+        ss.ls_tried = False
         st.rerun()
 
 st.divider()
