@@ -253,14 +253,19 @@ def build_trade():
         c.pattern = label
         pattern_marks[c.symbol] = marks
 
+    # Prefer BULLISH setups (we only buy). Fall back to the full list if none.
+    bullish = ("breakout", "double bottom", "triple bottom", "bull flag")
+    setups = [c for c in pool_top if any(k in c.pattern.lower() for k in bullish)]
+    choose_from = setups if setups else pool_top
+
     # Weighted-random pick so 'find' gives DIFFERENT answers each time; the AI,
-    # if configured, overrides with the cleanest pattern setup.
-    weights = [max(c.score, 1e-4) for c in pool_top]
-    candidate = random.choices(pool_top, weights=weights, k=1)[0]
+    # if a Groq key is set, overrides with the cleanest pattern setup.
+    weights = [max(c.score, 1e-4) for c in choose_from]
+    candidate = random.choices(choose_from, weights=weights, k=1)[0]
 
     ai = None
     if ss.groq_key:
-        subset = random.sample(pool_top, min(6, len(pool_top)))
+        subset = random.sample(choose_from, min(6, len(choose_from)))
         ai = ai_choose(subset, ss.groq_key)
         if ai is not None:
             match = next((c for c in subset if c.symbol == ai.symbol), None)
