@@ -44,6 +44,14 @@ class TestPatterns(unittest.TestCase):
                 for i in range(40)]
         self.assertEqual(detect_pattern(bars)[0], "Breakout to new highs")
 
+    def test_uptrend_not_mislabeled_as_triangle(self):
+        # Higher highs AND higher lows = an uptrend, NOT an ascending triangle.
+        closes = [100.0]
+        for i in range(44):
+            closes.append(closes[-1] + [3, 3, -1][i % 3])
+        bars = [Bar(close=c, volume=1000, high=c + 1.5, low=c - 1.5) for c in closes]
+        self.assertNotIn("triangle", detect_pattern(bars)[0].lower())
+
     def test_double_or_triple_bottom_detected(self):
         # Two equal lows (~104), recovering but staying BELOW the prior high (~120)
         # so it's a bottom, not a breakout.

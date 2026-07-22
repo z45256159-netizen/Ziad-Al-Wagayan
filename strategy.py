@@ -360,18 +360,24 @@ def detect_pattern(bars: List[Bar]):
                     [(p[0], h[0], "L shoulder"), (p[1], h[1], "head"),
                      (p[2], h[2], "R shoulder")])
 
-    # Triangles: flat on one side, converging on the other.
+    # Triangles: flat on one side, converging on the other. A triangle only
+    # counts while price is still INSIDE it — a flat ceiling it keeps hitting but
+    # hasn't broken (ascending), or a flat floor it keeps hitting (descending).
+    # If price is making higher highs / breaking out, it's a trend, not a triangle.
     if len(maxs) >= 2 and len(mins) >= 2:
         hi = [highs[i] for i in maxs[-2:]]
         lo = [lows[i] for i in mins[-2:]]
-        flat_top = abs(hi[0] - hi[1]) / max(hi) < 0.015
-        flat_bottom = abs(lo[0] - lo[1]) / max(lo) < 0.015
-        rising_lows = lo[1] > lo[0] * 1.01
-        falling_highs = hi[1] < hi[0] * 0.99
-        if flat_top and rising_lows:
+        ceiling, floor = max(hi), min(lo)
+        flat_top = abs(hi[0] - hi[1]) / ceiling < 0.01      # highs within 1%
+        flat_bottom = abs(lo[0] - lo[1]) / floor < 0.01     # lows within 1%
+        rising_lows = lo[1] > lo[0] * 1.015                 # clearly higher lows
+        falling_highs = hi[1] < hi[0] * 0.985               # clearly lower highs
+        below_ceiling = last < ceiling * 0.99               # still capped (not broken out)
+        above_floor = last > floor * 1.01                   # still holding (not broken down)
+        if flat_top and rising_lows and below_ceiling:
             return ("Ascending triangle",
                     [(mins[-2], lo[0], "low"), (mins[-1], lo[1], "higher low")])
-        if flat_bottom and falling_highs:
+        if flat_bottom and falling_highs and above_floor:
             return ("Descending triangle",
                     [(maxs[-2], hi[0], "high"), (maxs[-1], hi[1], "lower high")])
 
