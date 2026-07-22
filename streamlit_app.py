@@ -510,6 +510,16 @@ def place_pending() -> None:
                          "hours.)_")
 
 
+def auto_place_one() -> None:
+    """One hands-free cycle: find a trade and place it (used by the auto-trader)."""
+    msg, pending = build_trade()
+    say("assistant", "🔁 " + msg)
+    if pending is not None:
+        ss.pending = pending
+        place_pending()
+        ss.auto_count += 1
+
+
 def handle_command(text: str) -> None:
     t = text.strip().lower()
     say("user", text)
@@ -580,6 +590,10 @@ ss.setdefault("scan_mode", "Technical patterns")
 ss.setdefault("direction_mode", "Both")
 ss.setdefault("invest_entry", "Buy now (market)")
 ss.setdefault("invest_dip_pct", 5.0)
+ss.setdefault("auto_loop", False)      # hands-free auto-trader running?
+ss.setdefault("auto_max", 5)           # max trades per run
+ss.setdefault("auto_interval", 60)     # seconds between trades
+ss.setdefault("auto_count", 0)         # trades placed this run
 
 # --- A little CSS polish (theme-aware) ---
 st.markdown("""
@@ -693,6 +707,58 @@ _dir_icon = {"Both": "↔ Long & Short", "Long only": "🟢 Long only",
 _vision = "  ·  🔍 AI chart-vision ON" if ss.groq_key else ""
 st.caption(f"🔎 Mode: **{_mode_icon}**  ·  {_dir_icon}  "
            f"·  {'🤖 Auto' if ss.auto_mode else '✋ Manual'}{_vision}")
+
+# --- 🔁 Hands-free auto-trader (paper practice; runs only while this page is open) ---
+with st.expander("🔁 Auto-trader (hands-free)", expanded=ss.auto_loop):
+    st.caption("Finds and places trades for you on a timer — **only while this "
+               "page stays open** (it stops if you close/lock the phone). Paper "
+               "practice only; it does not guarantee profit.")
+    if not ss.auto_loop:
+        cc = st.columns(2)
+        ss.auto_max = int(cc[0].number_input("Max trades this run", 1, 50,
+                                             int(ss.auto_max)))
+        ss.auto_interval = int(cc[1].number_input("Seconds between trades", 30, 600,
+                                                 int(ss.auto_interval), step=30))
+        if st.button("▶️ Start auto-trading", type="primary",
+                     use_container_width=True):
+            ss.auto_loop = True
+            ss.auto_count = 0
+            say("assistant", f"🔁 **Auto-trader started** — up to {ss.auto_max} "
+                             f"trades, one every {ss.auto_interval}s, using your "
+                             f"current mode/settings. Keep this page open.")
+            st.rerun()
+    else:
+        st.success(f"🔁 Running — **{ss.auto_count}/{ss.auto_max}** trades placed.")
+        if st.button("⏹ Stop auto-trading", use_container_width=True):
+            ss.auto_loop = False
+            say("assistant", f"⏹ Auto-trader stopped after {ss.auto_count} trade(s).")
+            st.rerun()
+
+# The timer tick: while running, place one trade per interval, with guardrails.
+if ss.auto_loop:
+    try:
+        from streamlit_autorefresh import st_autorefresh
+        st_autorefresh(interval=int(ss.auto_interval) * 1000, key="auto_loop_timer")
+    except Exception:
+        st.warning("Auto-refresh unavailable — auto-trader can't run on this build.")
+        ss.auto_loop = False
+
+    if ss.auto_loop and ss.auto_count >= ss.auto_max:
+        ss.auto_loop = False
+        say("assistant", f"✅ Auto-trader finished — placed {ss.auto_count} trade(s).")
+    elif ss.auto_loop:
+        try:
+            _open = broker.is_market_open()
+        except BrokerError:
+            _open = None
+        if _open is False:
+            if not ss.get("auto_closed_said"):
+                say("assistant", "🔁 Market is closed — auto-trader is waiting for "
+                                 "the open (keep this page on).")
+                ss.auto_closed_said = True
+        else:
+            ss.auto_closed_said = False
+            auto_place_one()
 
 st.divider()
 
