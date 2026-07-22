@@ -15,7 +15,7 @@ def tradingview_url(symbol: str) -> str:
     return f"https://www.tradingview.com/chart/?symbol={symbol.upper()}"
 
 
-def make_position_chart(bars: List[Bar], plan):
+def make_position_chart(bars: List[Bar], plan, support=None, resistance=None):
     """
     Build a Plotly candlestick figure with the trade drawn on it:
       * green zone from entry up to the take-profit,
@@ -46,6 +46,20 @@ def make_position_chart(bars: List[Bar], plan):
                   fillcolor="rgba(34,197,94,0.15)", line_width=0, layer="below")
     fig.add_shape(type="rect", x0=x0, x1=x1, y0=plan.stop, y1=plan.entry,
                   fillcolor="rgba(239,68,68,0.15)", line_width=0, layer="below")
+
+    # Support (floor) and resistance (ceiling) — the S/R "boxes" traders watch.
+    if resistance:
+        fig.add_hline(y=resistance, line_dash="dot", line_color="#f59e0b",
+                      line_width=1)
+        fig.add_annotation(x=x0, y=resistance, text=f"Resistance {resistance:.2f}",
+                           showarrow=False, font=dict(color="#f59e0b", size=10),
+                           xanchor="left", yanchor="bottom")
+    if support:
+        fig.add_hline(y=support, line_dash="dot", line_color="#38bdf8",
+                      line_width=1)
+        fig.add_annotation(x=x0, y=support, text=f"Support {support:.2f}",
+                           showarrow=False, font=dict(color="#38bdf8", size=10),
+                           xanchor="left", yanchor="top")
 
     for price, color, label in [
         (plan.take_profit, "#22c55e",

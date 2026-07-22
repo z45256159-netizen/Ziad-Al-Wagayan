@@ -13,6 +13,7 @@ Deploy free:  see README (Streamlit Community Cloud).
 from __future__ import annotations
 
 import os
+import random
 
 import streamlit as st
 from ai import ai_choose, verify_key
@@ -249,13 +250,19 @@ def build_trade():
     # list, fall back to the full set.
     fresh = [c for c in tradeable if c.symbol not in ss.recent]
     pool = fresh if fresh else tradeable
+    pool_top = pool[:8]
 
-    candidate = pool[0]
+    # Weighted-random pick among the top so you get DIFFERENT answers each time
+    # (higher-scoring names are more likely, but it's not always the same one).
+    weights = [max(c.score, 1e-4) for c in pool_top]
+    candidate = random.choices(pool_top, weights=weights, k=1)[0]
+
     ai = None
     if ss.groq_key:
-        ai = ai_choose(pool[:6], ss.groq_key)
+        subset = random.sample(pool_top, min(6, len(pool_top)))
+        ai = ai_choose(subset, ss.groq_key)
         if ai is not None:
-            match = next((c for c in pool if c.symbol == ai.symbol), None)
+            match = next((c for c in subset if c.symbol == ai.symbol), None)
             if match is not None:
                 candidate = match
 
@@ -316,10 +323,13 @@ def build_trade():
         f"Target ${plan.take_profit:,.2f}**. (TradingView can't pre-draw it from a "
         "link — the box below is the same thing, already drawn.)_")
     parts.append("Place it? Tap **✅ Yes** or **❌ No** below (or type yes / no). "
-                 "The stop-loss and take-profit are placed automatically with it.")
+                 "Placing sends **3 orders at once** (a bracket): a buy, a "
+                 "stop-loss sell, and a take-profit sell — the exits fire "
+                 "automatically.")
 
     # Stash the chart (last ~40 bars of the chosen ticker) for rendering.
-    ss.view = {"plan": plan, "bars": bars[candidate.symbol][-40:]}
+    ss.view = {"plan": plan, "bars": bars[candidate.symbol][-40:],
+               "support": candidate.support, "resistance": candidate.resistance}
     return "\n\n".join(parts), {"plan": plan, "ai": ai}
 
 
@@ -335,13 +345,18 @@ def place_pending() -> None:
         )
         status = getattr(order.status, "value", order.status)
         say("assistant",
-            f"✅ Order placed! **{order.symbol} ×{order.qty}** at market — "
-            f"status **{status}**.\n\n"
-            f"🛑 Stop-loss ${plan.stop:,.2f} and 🎯 take-profit "
-            f"${plan.take_profit:,.2f} are attached automatically "
-            f"(id `{order.id}`).")
+            f"✅ **3 orders placed** for **{order.symbol}** (bracket):\n"
+            f"1. **BUY {order.qty}** @ market — status *{status}*\n"
+            f"2. 🛑 **SELL stop-loss** @ ${plan.stop:,.2f}\n"
+            f"3. 🎯 **SELL take-profit** @ ${plan.take_profit:,.2f}\n\n"
+            f"The stop and target trigger automatically — whichever hits first "
+            f"cancels the other. (Order id `{order.id}`.)\n\n"
+            f"_If the market is closed the buy queues until 9:30am ET, and the "
+            f"stop/target activate once it fills._")
     except BrokerError as exc:
-        say("assistant", f"❌ Order failed: {exc}")
+        say("assistant", f"❌ Order failed: {exc}\n\n_(If it mentions the market "
+                         "being closed or a bracket rule, try during market "
+                         "hours.)_")
 
 
 def handle_command(text: str) -> None:
@@ -502,7 +517,9 @@ for msg in ss.messages:
 # --- Chart of the latest pick (entry / stop / target drawn on candles) ---
 view = ss.get("view")
 if view:
-    fig = make_position_chart(view["bars"], view["plan"])
+    fig = make_position_chart(view["bars"], view["plan"],
+                              support=view.get("support"),
+                              resistance=view.get("resistance"))
     if fig is not None:
         st.plotly_chart(fig, use_container_width=True)
         st.link_button("📈 Open on TradingView",

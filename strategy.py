@@ -86,6 +86,9 @@ class SymbolScore:
     macd_hist: float          # MACD histogram (macd - signal); >0 is bullish
     atr: float                # 14-day Average True Range (volatility, in $)
     reason: str               # human-readable explanation of the signal
+    support: float = 0.0      # recent swing low (price floor)
+    resistance: float = 0.0   # recent swing high (price ceiling)
+    breakout: bool = False    # price broke above prior resistance (fresh high)
 
 
 # ------------------------------------------------------------------ indicators
@@ -144,6 +147,15 @@ def _atr(bars: List[Bar], period: int = 14) -> float:
     return sum(recent) / len(recent)
 
 
+def _support_resistance(bars: List[Bar], lookback: int = 20):
+    """Recent support (lowest low) and resistance (highest high) — the price
+    floor and ceiling day traders watch. Uses highs/lows when available."""
+    window = bars[-lookback:] if len(bars) >= lookback else bars
+    highs = [(b.high if b.high is not None else b.close) for b in window]
+    lows = [(b.low if b.low is not None else b.close) for b in window]
+    return (min(lows), max(highs))
+
+
 # --------------------------------------------------------------------- scoring
 def score_symbol(symbol: str, bars: List[Bar]) -> Optional[SymbolScore]:
     """
@@ -172,6 +184,10 @@ def score_symbol(symbol: str, bars: List[Bar]) -> Optional[SymbolScore]:
     rsi = _rsi(closes)
     macd_hist = _macd_hist(closes)
     atr = _atr(bars)
+    support, resistance = _support_resistance(bars)
+    # Breakout: today closes above the ceiling of the PRIOR days (a fresh high).
+    _, prior_resistance = _support_resistance(bars[:-3] if len(bars) > 3 else bars)
+    breakout = last_price >= prior_resistance
 
     # --- Filters: ALL must pass to be a candidate ---
     trend_up = last_price > sma_fast and sma_fast > sma_slow  # MA crossover uptrend
@@ -181,8 +197,9 @@ def score_symbol(symbol: str, bars: List[Bar]) -> Optional[SymbolScore]:
     if not (trend_up and momentum_ok and macd_bull and volume_ok):
         return None
 
-    # Combined score: reward stocks well above their trend AND on heavy volume.
-    score = momentum_strength * volume_ratio
+    # Combined score: reward stocks well above trend AND on heavy volume, with a
+    # bonus for a fresh breakout above resistance (a strong day-trade setup).
+    score = momentum_strength * volume_ratio * (1.2 if breakout else 1.0)
 
     reason = (
         f"Uptrend: ${last_price:.2f} > {SMA_FAST}-day SMA ${sma_fast:.2f} > "
@@ -190,7 +207,9 @@ def score_symbol(symbol: str, bars: List[Bar]) -> Optional[SymbolScore]:
         f"RSI {rsi:.0f} (momentum, not overbought). "
         f"MACD bullish (histogram {macd_hist:+.2f}). "
         f"Volume {volume_ratio:.2f}x its {VOLUME_PERIOD}-day average. "
-        f"Typical daily move (ATR) ${atr:.2f}."
+        f"Support ${support:.2f} / resistance ${resistance:.2f}"
+        + (" — 🔼 breaking to new highs. " if breakout else ". ")
+        + f"Typical daily move (ATR) ${atr:.2f}."
     )
 
     return SymbolScore(
@@ -204,6 +223,9 @@ def score_symbol(symbol: str, bars: List[Bar]) -> Optional[SymbolScore]:
         macd_hist=macd_hist,
         atr=atr,
         reason=reason,
+        support=support,
+        resistance=resistance,
+        breakout=breakout,
     )
 
 
@@ -253,6 +275,7 @@ def score_relaxed(symbol: str, bars: List[Bar]) -> Optional[SymbolScore]:
     rsi = _rsi(closes)
     macd_hist = _macd_hist(closes)
     atr = _atr(bars)
+    support, resistance = _support_resistance(bars)
 
     # Soft score: mostly momentum, nudged by volume.
     score = momentum_strength + 0.1 * (volume_ratio - 1.0)
@@ -264,12 +287,14 @@ def score_relaxed(symbol: str, bars: List[Bar]) -> Optional[SymbolScore]:
         f"vol {volume_ratio:.2f}x",
     ]
     reason = ("Closest match (not a full setup) — " + ", ".join(checks) +
-              f". ATR ${atr:.2f}.")
+              f". Support ${support:.2f} / resistance ${resistance:.2f}. "
+              f"ATR ${atr:.2f}.")
 
     return SymbolScore(
         symbol=symbol, score=score, last_price=last_price, sma=sma_fast,
         momentum_strength=momentum_strength, volume_ratio=volume_ratio,
         rsi=rsi, macd_hist=macd_hist, atr=atr, reason=reason,
+        support=support, resistance=resistance,
     )
 
 
