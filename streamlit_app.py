@@ -242,30 +242,43 @@ def build_trade():
         return ("Every mover is already in your portfolio — skipping to avoid "
                 "doubling up."), None
 
-    # Variety: prefer candidates we haven't just suggested.
-    fresh = [c for c in tradeable if c.symbol not in ss.recent]
-    pool_top = (fresh if fresh else tradeable)[:8]
+    dmode = ss.direction_mode         # "Both" / "Long only" / "Short only"
+    forced = ("short" if dmode == "Short only"
+              else "long" if dmode == "Long only" else None)
 
-    # Detect a chart pattern for each candidate (breakout, double bottom, flag…).
+    def allowed(d: str) -> bool:
+        return d in ("long", "short") if forced is None else d == forced
+
+    if ss.scan_mode == "Best performers":
+        # Ignore patterns — take the strongest movers (or weakest, to short).
+        want_short = (dmode == "Short only")
+        ordered = sorted(tradeable, key=lambda c: c.score, reverse=not want_short)
+        pool = [c for c in ordered if c.symbol not in ss.recent] or ordered
+        pool_top = pool[:8]
+        direction = "short" if want_short else "long"
+    else:
+        # Technical patterns — prefer stocks with a recognized setup that matches
+        # the chosen direction.
+        fresh = [c for c in tradeable if c.symbol not in ss.recent]
+        pool_top = (fresh if fresh else tradeable)[:10]
+        setups = [c for c in pool_top if allowed(direction_of(c.pattern))]
+        pool_top = setups if setups else pool_top
+        direction = None  # decided per-candidate below
+
+    # Detect chart pattern for each candidate in the working pool (for the chart).
     pattern_marks = {}
     for c in pool_top:
         label, marks = detect_pattern(bars[c.symbol][-40:])
         c.pattern = label
         pattern_marks[c.symbol] = marks
 
-    # Prefer stocks with a RECOGNIZED setup — bullish (we go long) OR bearish
-    # (we short). Only "range / no clear pattern" is skipped.
-    setups = [c for c in pool_top if direction_of(c.pattern) != "none"]
-    choose_from = setups if setups else pool_top
-
-    # Weighted-random pick so 'find' gives DIFFERENT answers each time; the AI,
-    # if a Groq key is set, overrides with the cleanest pattern setup.
-    weights = [max(c.score, 1e-4) for c in choose_from]
-    candidate = random.choices(choose_from, weights=weights, k=1)[0]
+    # Weighted-random pick so 'find' gives DIFFERENT answers each time.
+    weights = [max(abs(c.score), 1e-4) for c in pool_top]
+    candidate = random.choices(pool_top, weights=weights, k=1)[0]
 
     ai = None
     if ss.groq_key:
-        subset = random.sample(choose_from, min(6, len(choose_from)))
+        subset = random.sample(pool_top, min(6, len(pool_top)))
         ai = ai_choose(subset, ss.groq_key)
         if ai is not None:
             match = next((c for c in subset if c.symbol == ai.symbol), None)
@@ -277,9 +290,10 @@ def build_trade():
     except BrokerError as exc:
         return f"⚠️ Couldn't read your buying power: {exc}", None
 
-    direction = direction_of(candidate.pattern)
-    if direction == "none":
-        direction = "long"  # default to long when the pattern is unclear
+    if direction is None:  # patterns mode: use the pattern's direction
+        direction = direction_of(candidate.pattern)
+        if not allowed(direction):
+            direction = forced or "long"
 
     plan = build_trade_plan(
         score=candidate,
@@ -446,6 +460,8 @@ ss.setdefault("max_order", cfg.max_order_dollars)
 ss.setdefault("stop_mult", 1.5)
 ss.setdefault("reward_risk", 2.0)
 ss.setdefault("auto_mode", False)
+ss.setdefault("scan_mode", "Technical patterns")
+ss.setdefault("direction_mode", "Both")
 
 # --- A little CSS polish (theme-aware) ---
 st.markdown("""
@@ -489,6 +505,19 @@ except BrokerError:
 
 # --- Settings + disconnect ---
 with st.expander("⚙️ Trading settings"):
+    ss.scan_mode = st.radio(
+        "How to find trades",
+        ["Technical patterns", "Best performers"],
+        index=["Technical patterns", "Best performers"].index(ss.scan_mode),
+        help="Technical patterns = find chart setups (head & shoulders, double "
+             "bottom, breakout…). Best performers = just take the strongest "
+             "movers.")
+    ss.direction_mode = st.radio(
+        "Trade direction",
+        ["Both", "Long only", "Short only"],
+        index=["Both", "Long only", "Short only"].index(ss.direction_mode),
+        help="Long = buy (profit if it rises). Short = sell (profit if it falls).")
+    st.markdown("---")
     ss.risk_pct = st.slider(
         "Risk per trade (% of buying power)", 0.25, 5.0,
         float(ss.risk_pct * 100), 0.25,
