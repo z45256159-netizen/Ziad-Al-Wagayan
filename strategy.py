@@ -360,6 +360,21 @@ def detect_pattern(bars: List[Bar]):
                     [(p[0], h[0], "L shoulder"), (p[1], h[1], "head"),
                      (p[2], h[2], "R shoulder")])
 
+    # Triangles: flat on one side, converging on the other.
+    if len(maxs) >= 2 and len(mins) >= 2:
+        hi = [highs[i] for i in maxs[-2:]]
+        lo = [lows[i] for i in mins[-2:]]
+        flat_top = abs(hi[0] - hi[1]) / max(hi) < 0.015
+        flat_bottom = abs(lo[0] - lo[1]) / max(lo) < 0.015
+        rising_lows = lo[1] > lo[0] * 1.01
+        falling_highs = hi[1] < hi[0] * 0.99
+        if flat_top and rising_lows:
+            return ("Ascending triangle",
+                    [(mins[-2], lo[0], "low"), (mins[-1], lo[1], "higher low")])
+        if flat_bottom and falling_highs:
+            return ("Descending triangle",
+                    [(maxs[-2], hi[0], "high"), (maxs[-1], hi[1], "lower high")])
+
     # Flags: a pause within the prevailing trend.
     if (last > sma and closes[-1] > closes[-4]
             and (max(closes[-12:]) - last) / max(closes[-12:]) < 0.06):
@@ -378,9 +393,10 @@ def detect_pattern(bars: List[Bar]):
 def direction_of(label: str) -> str:
     """Map a pattern label to a trade direction: 'long', 'short', or 'none'."""
     low = label.lower()
-    longs = ("breakout", "double bottom", "triple bottom", "bull flag", "uptrend")
+    longs = ("breakout", "double bottom", "triple bottom", "bull flag",
+             "ascending triangle", "uptrend")
     shorts = ("breakdown", "double top", "triple top", "head & shoulders",
-              "bear flag", "downtrend")
+              "bear flag", "descending triangle", "downtrend")
     if any(k in low for k in longs):
         return "long"
     if any(k in low for k in shorts):

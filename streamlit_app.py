@@ -17,7 +17,7 @@ import random
 
 import streamlit as st
 from ai import ai_choose, verify_key
-from analysis import explain_pattern, invest_analysis
+from analysis import explain_setup, invest_analysis
 from broker import Broker, BrokerError
 from chart import make_position_chart, tradingview_url
 from config import Config, ConfigError
@@ -370,10 +370,12 @@ def build_trade():
     pattern = (ai.pattern if (ai is not None and ai.pattern) else candidate.pattern)
     parts = [f"### 📊 {sym} @ ${plan.entry:,.2f}"]
     parts.append(f"📐 **Setup found: {pattern}**")
-    info = explain_pattern(candidate.pattern)
+    info = explain_setup(candidate.pattern, candidate.support,
+                         candidate.resistance, plan.entry,
+                         pattern_marks.get(sym, []))
     if info:
         what, why, how = info
-        parts.append(f"**How I found it:** {sym} is showing {what}.\n\n"
+        parts.append(f"**How I found it:** {sym} shows {what}.\n\n"
                      f"**Why it's a signal:** {why}.\n\n"
                      f"**How to trade it:** {how}.")
     parts.append(f"**The numbers:** {candidate.reason}")

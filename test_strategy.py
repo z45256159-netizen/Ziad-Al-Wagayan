@@ -13,15 +13,19 @@ from strategy import (Bar, detect_pattern, direction_of, find_candidate,
 
 
 class TestAnalysis(unittest.TestCase):
-    def test_explain_pattern_known(self):
-        from analysis import explain_pattern
-        info = explain_pattern("Double bottom")
+    def test_explain_setup_cites_real_levels(self):
+        from analysis import explain_setup
+        marks = [(3, 187.20, "bottom"), (9, 188.05, "bottom")]
+        info = explain_setup("Double bottom", support=187.0, resistance=210.0,
+                             entry=195.0, marks=marks)
         self.assertIsNotNone(info)
-        self.assertEqual(len(info), 3)  # what, why, how
+        joined = " ".join(info)
+        self.assertIn("187", joined)   # actual support / swing-low price
+        self.assertIn("210", joined)   # actual resistance / target
 
-    def test_explain_pattern_unknown(self):
-        from analysis import explain_pattern
-        self.assertIsNone(explain_pattern("Range / no clear pattern"))
+    def test_explain_setup_unknown(self):
+        from analysis import explain_setup
+        self.assertIsNone(explain_setup("Range / no clear pattern", 1, 2, 1.5, []))
 
     def test_invest_analysis_uptrend_is_good(self):
         from analysis import invest_analysis

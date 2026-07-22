@@ -17,7 +17,7 @@ from strategy import Bar
 
 # what it is · why it's a signal · how you'd trade it
 PATTERN_INFO = {
-    "double bottom": ("a 'W' shape — price fell to about the same low twice and bounced",
+    "double bottom": ("two swing lows at about the same price forming support",
                       "buyers keep defending that floor, so a move up is likely",
                       "enter as it turns up, stop just below the double low, target the prior high"),
     "triple bottom": ("three touches of about the same low",
@@ -29,7 +29,7 @@ PATTERN_INFO = {
     "bull flag": ("a small, calm pullback after a strong run up",
                   "trends usually resume after a short rest",
                   "enter as it turns back up, stop under the flag, target trend continuation"),
-    "double top": ("an 'M' shape — price hit about the same high twice and rejected",
+    "double top": ("two swing highs at about the same price forming resistance",
                    "sellers keep defending that ceiling, so a drop is likely",
                    "short the break down, stop above the highs, target the prior low"),
     "triple top": ("three rejections of about the same high",
@@ -59,6 +59,99 @@ def explain_pattern(label: str):
     for key, info in PATTERN_INFO.items():
         if key in low:
             return info
+    return None
+
+
+def explain_setup(label: str, support: float, resistance: float, entry: float,
+                  marks):
+    """
+    Real, level-specific analysis of THIS stock — cites the actual swing-point
+    prices, support, and resistance rather than a generic shape description.
+    Returns (what, why, how) or None for an unrecognized label.
+    """
+    low = label.lower()
+    pts = [m[1] for m in (marks or [])]
+
+    def lvls(default):
+        return ", ".join(f"${p:,.2f}" for p in pts) if pts else default
+
+    if "bottom" in low:  # double / triple bottom
+        return (
+            f"{len(pts) or 2} swing lows near {lvls(f'${support:,.2f}')} held as "
+            f"support around ${support:,.2f}, and price has recovered to ${entry:,.2f}",
+            f"repeated lows at the same level show buyers defending it; reclaiming "
+            f"the level confirms the reversal",
+            f"long above the base, stop below ${support:,.2f}, target the prior "
+            f"high near ${resistance:,.2f}")
+    if "top" in low and "triangle" not in low:  # double / triple top
+        return (
+            f"{len(pts) or 2} swing highs near {lvls(f'${resistance:,.2f}')} were "
+            f"rejected at resistance ${resistance:,.2f}, with price now at ${entry:,.2f}",
+            f"repeated highs at the same level show sellers defending it; failing "
+            f"there signals a turn down",
+            f"short below the pattern, stop above ${resistance:,.2f}, target the "
+            f"prior low near ${support:,.2f}")
+    if "head" in low:  # head & shoulders
+        if len(pts) >= 3:
+            what = (f"three peaks — left shoulder ${pts[0]:,.2f}, head "
+                    f"${pts[1]:,.2f} (highest), right shoulder ${pts[2]:,.2f} — "
+                    f"over a neckline near ${support:,.2f}")
+        else:
+            what = (f"three peaks with the middle highest over a neckline near "
+                    f"${support:,.2f}")
+        return (what,
+                "the lower right shoulder shows momentum fading after the head",
+                f"short on a break below the neckline ${support:,.2f}, stop above "
+                f"the right shoulder, target a measured move down")
+    if "ascending triangle" in low:
+        return (f"a flat resistance near ${resistance:,.2f} with rising lows up to "
+                f"${entry:,.2f}",
+                "buyers keep paying higher prices while sellers cap one level — "
+                "pressure builds for an upside break",
+                f"long on a break above ${resistance:,.2f}, stop under the last "
+                f"higher low, target a measured move up")
+    if "descending triangle" in low:
+        return (f"a flat support near ${support:,.2f} with falling highs down to "
+                f"${entry:,.2f}",
+                "sellers keep pressing lower while buyers defend one level — "
+                "pressure builds for a downside break",
+                f"short on a break below ${support:,.2f}, stop above the last "
+                f"lower high, target a measured move down")
+    if "breakout" in low:
+        return (f"price reached ${entry:,.2f}, clearing recent resistance at "
+                f"${resistance:,.2f}",
+                "with no sellers left overhead, breakouts often keep running",
+                f"long on the break, stop back below ${resistance:,.2f}, target "
+                f"a continuation higher")
+    if "breakdown" in low:
+        return (f"price fell to ${entry:,.2f}, losing recent support at "
+                f"${support:,.2f}",
+                "with the floor gone, breakdowns often keep falling",
+                f"short the break, stop back above ${support:,.2f}, target lower")
+    if "bull flag" in low:
+        return (f"a shallow pullback to ${entry:,.2f} after a run up, holding "
+                f"above ${support:,.2f}",
+                "a brief rest inside an uptrend usually resolves upward",
+                f"long as it turns up, stop below ${support:,.2f}, target "
+                f"${resistance:,.2f}")
+    if "bear flag" in low:
+        return (f"a shallow bounce to ${entry:,.2f} after a drop, capped below "
+                f"${resistance:,.2f}",
+                "a brief bounce inside a downtrend usually resolves downward",
+                f"short as it rolls over, stop above ${resistance:,.2f}, target "
+                f"${support:,.2f}")
+    if "uptrend" in low:
+        return (f"higher highs and higher lows, price ${entry:,.2f} above support "
+                f"${support:,.2f}",
+                "the trend is up; pullbacks tend to get bought",
+                f"long, stop under the last higher low near ${support:,.2f}, "
+                f"target the highs near ${resistance:,.2f}")
+    if "downtrend" in low:
+        return (f"lower highs and lower lows, price ${entry:,.2f} below resistance "
+                f"${resistance:,.2f}",
+                "the trend is down; bounces tend to get sold",
+                f"short, stop over the last lower high near ${resistance:,.2f}, "
+                f"target the lows near ${support:,.2f}")
     return None
 
 
