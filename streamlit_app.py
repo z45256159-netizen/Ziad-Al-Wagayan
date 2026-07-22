@@ -16,13 +16,15 @@ import os
 import random
 
 import streamlit as st
-from ai import ai_choose, verify_key, vision_pattern
+from ai import verify_key, vision_pattern
 from analysis import explain_setup, invest_analysis, news_sentiment
 from broker import Broker, BrokerError
 from chart import chart_png, make_position_chart, tradingview_url
 from config import Config, ConfigError
-from sizing import TradePlan, build_trade_plan
-from strategy import detect_pattern, direction_of, rank_relaxed
+from engine import MIN_RR, build_setup
+from sizing import TradePlan
+from strategy import (detect_pattern, direction_of, rank_candidates,
+                      rank_relaxed)
 from universe import UNIVERSE, describe
 
 st.set_page_config(page_title="Alpaca Trading Bot", page_icon="📈", layout="centered")
@@ -212,6 +214,16 @@ broker: Broker = ss.broker
 cfg: Config = ss.cfg
 
 
+def _setup_to_plan(setup) -> TradePlan:
+    """Convert an engine Setup into the TradePlan the placing/UI code expects."""
+    return TradePlan(
+        symbol=setup.symbol, qty=setup.qty, entry=setup.entry, stop=setup.stop,
+        take_profit=setup.target, cost=round(setup.qty * setup.entry, 2),
+        risk_total=setup.risk_total, reward_total=setup.reward_total,
+        rr_ratio=setup.rr, stop_pct=setup.stop_pct, tp_pct=setup.tp_pct,
+        side=setup.side, direction=setup.direction, limit_price=setup.limit_price)
+
+
 def build_trade():
     """Scan and pick one trade. Returns (assistant_text, pending_dict_or_None)."""
     ss.view = None  # clear any previous chart until we have a fresh plan
@@ -228,7 +240,7 @@ def build_trade():
         return "No market data came back. Try again in a moment.", None
 
     # ONE broad filter: rank all stocks as "movers" (by momentum + volume);
-    # nothing is rejected up front. The AI then looks for the best setup.
+    # nothing is rejected up front. The engine then validates the best setup.
     movers = rank_relaxed(bars)
     if not movers:
         return ("Couldn't score any stock (not enough price history). "
@@ -243,6 +255,11 @@ def build_trade():
         return ("Every mover is already in your portfolio — skipping to avoid "
                 "doubling up."), None
 
+    try:
+        buying_power = broker.get_buying_power()
+    except BrokerError as exc:
+        return f"⚠️ Couldn't read your buying power: {exc}", None
+
     dmode = ss.direction_mode         # "Both" / "Long only" / "Short only"
     forced = ("short" if dmode == "Short only"
               else "long" if dmode == "Long only" else None)
@@ -250,151 +267,180 @@ def build_trade():
     def allowed(d: str) -> bool:
         return d in ("long", "short") if forced is None else d == forced
 
-    investing = (ss.scan_mode == "Best performers")
+    if ss.scan_mode == "Best performers":
+        return _build_investing(bars, tradeable, buying_power, market_open)
+    return _build_technical(bars, tradeable, buying_power, market_open,
+                            forced, allowed)
 
-    if investing:
-        # Long-term: rank by ~3-month performance, buy the leaders.
-        def perf(c):
-            b = bars[c.symbol]
-            base = b[-60].close if len(b) >= 60 else b[0].close
-            return (b[-1].close - base) / base if base > 0 else 0.0
-        ordered = sorted(tradeable, key=perf, reverse=True)
-        pool = [c for c in ordered if c.symbol not in ss.recent] or ordered
-        pool_top = pool[:8]
-        direction = "long"
+
+# ---------------------------------------------------------------------------
+# BEST PERFORMERS  →  long-term investing view (quality score, horizon, news)
+# ---------------------------------------------------------------------------
+def _build_investing(bars, tradeable, buying_power, market_open):
+    benchmark = bars.get("SPY")
+
+    # Rank the field by ~3-month performance, then keep a fresh pool.
+    def perf(c):
+        b = bars[c.symbol]
+        base = b[-60].close if len(b) >= 60 else b[0].close
+        return (b[-1].close - base) / base if base > 0 else 0.0
+    ordered = sorted(tradeable, key=perf, reverse=True)
+    pool = [c for c in ordered if c.symbol not in ss.recent] or ordered
+    pool_top = pool[:8]
+
+    # Analyse each candidate for QUALITY (trend, relative strength, drawdown,
+    # 1-year return) and pick among the best few — not just the top mover.
+    scored = []
+    for c in pool_top:
+        a = invest_analysis(bars[c.symbol], c.atr, benchmark_bars=benchmark)
+        scored.append((a.score, c, a))
+    scored.sort(key=lambda t: t[0], reverse=True)
+    _, candidate, a = random.choice(scored[:3])
+    sym = candidate.symbol
+    ss.recent = ([sym] + ss.recent)[:3]
+    price = round(candidate.last_price, 2)
+    chart_bars = bars[sym][-40:]
+
+    # News sentiment can nudge the verdict up or down one notch.
+    news = broker.get_news(sym)
+    sent_label, sent_emoji, _ = news_sentiment(news)
+    ladder = ["AVOID", "HOLD", "BUY", "STRONG BUY"]
+    verdict = a.verdict
+    if verdict in ladder:
+        i = ladder.index(verdict)
+        if sent_label == "BEARISH" and i > 0:
+            verdict = ladder[i - 1]
+        elif sent_label == "BULLISH" and i < len(ladder) - 1:
+            verdict = ladder[i + 1]
+
+    # Entry: buy now (market) or a limit on a dip.
+    if ss.invest_entry == "Limit on a dip":
+        entry = round(price * (1 - ss.invest_dip_pct / 100), 2)
+        limit_price = entry
     else:
-        fresh = [c for c in tradeable if c.symbol not in ss.recent]
-        pool_top = (fresh if fresh else tradeable)[:10]
-        direction = None  # decided per-candidate below
+        entry = price
+        limit_price = None
 
-    # Detect chart pattern for each candidate in the working pool (for the chart).
+    budget = min(0.10 * buying_power, ss.max_order * 3, buying_power)
+    qty = int(budget // entry) or (1 if entry <= buying_power else 0)
+    if qty < 1:
+        return (f"One share of {sym} (${entry:,.2f}) is more than your "
+                "buying power."), None
+
+    exp_pct, dn_pct = a.exp_return_pct, a.downside_pct
+    stop = round(entry * (1 - dn_pct / 100), 2)
+    target = round(entry * (1 + exp_pct / 100), 2)
+    risk_total = round(qty * (entry - stop), 2)
+    reward_total = round(qty * (target - entry), 2)
+    rr = round(reward_total / risk_total, 2) if risk_total else 0.0
+    plan = TradePlan(sym, qty, entry, stop, target, round(qty * entry, 2),
+                     risk_total, reward_total, rr, dn_pct, exp_pct,
+                     side="buy", direction="long", limit_price=limit_price)
+
+    emoji = {"STRONG BUY": "🟢", "BUY": "🟢", "HOLD": "🟡",
+             "AVOID": "🔴"}.get(verdict, "🟡")
+    parts = [f"### 📈 {sym} — long-term pick @ ${price:,.2f}"]
+    parts.append(f"**What it is:** {describe(sym)}")
+    parts.append(f"**Verdict: {emoji} {verdict}** · quality **{a.score}/100** · "
+                 f"3-month {a.perf_pct:+.0f}% · 1-year {a.perf_1y_pct:+.0f}% · "
+                 f"rel. strength {a.rel_strength:+.0f}% · news {sent_emoji} "
+                 f"{sent_label.title()}")
+    if a.reasons:
+        parts.append("**Why:**\n" + "\n".join(f"- {r}" for r in a.reasons))
+    parts.append(f"_{a.reason}_")
+    if verdict == "AVOID":
+        parts.append("⚠️ _This one doesn't meet the quality bar right now — "
+                     "shown for transparency. Consider skipping._")
+
+    if limit_price:
+        entry_line = (f"- 🟢 **Buy {qty} share(s)** with a **LIMIT at "
+                      f"${entry:,.2f}** (−{ss.invest_dip_pct:.0f}% — fills only "
+                      f"if it dips there)")
+    else:
+        entry_line = (f"- 🟢 **Buy {qty} share(s) now** (~${plan.cost:,.2f}) — "
+                      f"{plan.cost / buying_power * 100:.0f}% of buying power")
+    parts.append(
+        "**📊 Plan (buy & hold)**\n"
+        f"{entry_line}\n"
+        f"- ⏳ Suggested hold: **{a.horizon}**\n"
+        f"- 📈 If it keeps its pace: **~+{exp_pct:.0f}%** (≈ +${reward_total:,.0f}) "
+        f"→ target ${target:,.2f}\n"
+        f"- 📉 Downside if wrong: **~-{dn_pct:.0f}%** (≈ -${risk_total:,.0f}) "
+        f"→ protective stop ${stop:,.2f}\n"
+        f"- ⚖️ Reward:risk ≈ **1 : {rr:g}**")
+    if news:
+        parts.append("**📰 Recent news:**\n" +
+                     "\n".join(f"- {h}" + (f" ({s})" if s else "")
+                               for h, s in news))
+    else:
+        parts.append("_No recent news found for this ticker._")
+    parts.append("_Price-based estimates for learning, not guarantees or a "
+                 "substitute for company fundamentals._")
+    if market_open is False:
+        parts.append("_Market is closed — the order will queue until it opens._")
+    parts.append("Place it? Tap **✅ Yes** or **❌ No** (entry + protective "
+                 "stop + target, placed as one bracket).")
+    ss.view = {"plan": plan, "bars": chart_bars,
+               "support": candidate.support, "resistance": candidate.resistance,
+               "marks": []}
+    return "\n\n".join(parts), {"plan": plan, "ai": None}
+
+
+# ---------------------------------------------------------------------------
+# TECHNICAL  →  engine scan: only take a VALIDATED, risk-gated setup, or none.
+# ---------------------------------------------------------------------------
+def _build_technical(bars, tradeable, buying_power, market_open, forced, allowed):
+    fresh = [c for c in tradeable if c.symbol not in ss.recent]
+    pool_top = (fresh if fresh else tradeable)[:12]
+
+    # Detect chart patterns (for the chart + the pattern-implied direction).
     pattern_marks = {}
     for c in pool_top:
         label, marks = detect_pattern(bars[c.symbol][-40:])
         c.pattern = label
         pattern_marks[c.symbol] = marks
 
-    # Technical: prefer setups matching the allowed direction.
-    if not investing:
-        setups = [c for c in pool_top if allowed(direction_of(c.pattern))]
-        if setups:
-            pool_top = setups
+    # Build a validated setup for each name. Only geometry-valid, reward:risk-
+    # passing setups survive. Nothing is forced.
+    valid = []  # list of (candidate, setup)
+    for c in pool_top:
+        pd = direction_of(c.pattern)
+        dirs = [pd] + [d for d in ("long", "short") if d != pd] \
+            if (forced is None and pd in ("long", "short")) \
+            else ([forced] if forced else ["long", "short"])
+        for d in dirs:
+            if not allowed(d):
+                continue
+            s = build_setup(c.symbol, bars[c.symbol], d, buying_power,
+                            ss.risk_pct, ss.max_order,
+                            vol_ratio=getattr(c, "volume_ratio", 1.0),
+                            news_score=0, min_rr=ss.min_rr)
+            if s.ok:
+                valid.append((c, s))
+                break  # one direction per symbol
 
-    weights = [max(abs(c.score), 1e-4) for c in pool_top]
-    candidate = random.choices(pool_top, weights=weights, k=1)[0]
+    if not valid:
+        return (f"🚫 **No trade right now.** I scanned the whole watchlist and "
+                f"nothing offered a clean, validated setup with a good "
+                f"reward-to-risk (≥ 1:{ss.min_rr:g}) in your allowed direction.\n\n"
+                f"**Quality over quantity** — I won't force a bad trade. "
+                f"Try **find** again later, or widen the direction in settings."), None
 
-    ai = None
-    if ss.groq_key:
-        subset = random.sample(pool_top, min(6, len(pool_top)))
-        ai = ai_choose(subset, ss.groq_key)
-        if ai is not None:
-            match = next((c for c in subset if c.symbol == ai.symbol), None)
-            if match is not None:
-                candidate = match
-
-    try:
-        buying_power = broker.get_buying_power()
-    except BrokerError as exc:
-        return f"⚠️ Couldn't read your buying power: {exc}", None
-
-    ss.recent = ([candidate.symbol] + ss.recent)[:3]
+    # Pick among the top-confidence setups for a little variety.
+    valid.sort(key=lambda t: t[1].confidence, reverse=True)
+    candidate, setup = random.choice(valid[:3])
     sym = candidate.symbol
+    ss.recent = ([sym] + ss.recent)[:3]
     chart_bars = bars[sym][-40:]
 
-    # =====================================================================
-    # BEST PERFORMERS  →  long-term investing view (verdict, horizon, news)
-    # =====================================================================
-    if investing:
-        a = invest_analysis(bars[sym], candidate.atr)
-        price = round(candidate.last_price, 2)
+    # News for the winner → fold its sentiment into the confidence.
+    news = broker.get_news(sym)
+    sent_label, sent_emoji, _ = news_sentiment(news)
+    news_score = 1 if sent_label == "BULLISH" else -1 if sent_label == "BEARISH" else 0
 
-        # News + rough sentiment (is the news good?).
-        news = broker.get_news(sym)
-        sent_label, sent_emoji, _ = news_sentiment(news)
-
-        # Blend news into the verdict: bad news pulls it down a notch.
-        verdict = a.verdict
-        if sent_label == "BAD" and verdict == "GOOD":
-            verdict = "OKAY"
-        elif sent_label == "BAD" and verdict == "OKAY":
-            verdict = "AVOID"
-
-        # Entry: buy now (market) or a limit on a dip.
-        if ss.invest_entry == "Limit on a dip":
-            entry = round(price * (1 - ss.invest_dip_pct / 100), 2)
-            limit_price = entry
-        else:
-            entry = price
-            limit_price = None
-
-        budget = min(0.10 * buying_power, ss.max_order * 3, buying_power)
-        qty = int(budget // entry) or (1 if entry <= buying_power else 0)
-        if qty < 1:
-            return (f"One share of {sym} (${entry:,.2f}) is more than your "
-                    "buying power."), None
-        exp_pct = a.exp_return_pct if a.exp_return_pct > 0 else a.downside_pct * 1.2
-        stop = round(entry * (1 - a.downside_pct / 100), 2)
-        target = round(entry * (1 + exp_pct / 100), 2)
-        risk_total = round(qty * (entry - stop), 2)
-        reward_total = round(qty * (target - entry), 2)
-        rr = round(reward_total / risk_total, 2) if risk_total else 0.0
-        plan = TradePlan(sym, qty, entry, stop, target, round(qty * entry, 2),
-                         risk_total, reward_total, rr, a.downside_pct, exp_pct,
-                         side="buy", direction="long", limit_price=limit_price)
-
-        emoji = {"GOOD": "🟢", "OKAY": "🟡", "AVOID": "🔴"}.get(verdict, "🟡")
-        parts = [f"### 📈 {sym} — long-term pick @ ${price:,.2f}"]
-        parts.append(f"**What it is:** {describe(sym)}")
-        parts.append(f"**Verdict: {emoji} {verdict}** · {a.perf_pct:+.0f}% over "
-                     f"~3 months · news {sent_emoji} {sent_label}")
-        parts.append(f"**Why buy:** {a.reason} "
-                     + ("Recent news looks supportive too." if sent_label == "GOOD"
-                        else "Watch the news — it looks negative." if sent_label == "BAD"
-                        else ""))
-
-        if limit_price:
-            entry_line = (f"- 🟢 **Buy {qty} share(s)** with a **LIMIT at "
-                          f"${entry:,.2f}** (−{ss.invest_dip_pct:.0f}% — fills only "
-                          f"if it dips there)")
-        else:
-            entry_line = (f"- 🟢 **Buy {qty} share(s) now** (~${plan.cost:,.2f}) — "
-                          f"{plan.cost / buying_power * 100:.0f}% of buying power")
-        parts.append(
-            "**📊 Plan (buy & hold)**\n"
-            f"{entry_line}\n"
-            f"- ⏳ Suggested hold: **{a.horizon}**\n"
-            f"- 📈 If it keeps its pace: **~+{exp_pct:.0f}%** (≈ +${reward_total:,.0f}) "
-            f"→ target ${target:,.2f}\n"
-            f"- 📉 Downside if wrong: **~-{a.downside_pct:.0f}%** (≈ -${risk_total:,.0f}) "
-            f"→ protective stop ${stop:,.2f}\n"
-            f"- ⚖️ Reward:risk ≈ **1 : {rr:g}**")
-        if news:
-            parts.append("**📰 Recent news:**\n" +
-                         "\n".join(f"- {h}" + (f" ({s})" if s else "")
-                                   for h, s in news))
-        else:
-            parts.append("_No recent news found for this ticker._")
-        parts.append("_Estimates for learning, not guarantees._")
-        if market_open is False:
-            parts.append("_Market is closed — the order will queue until it opens._")
-        parts.append("Place it? Tap **✅ Yes** or **❌ No** (entry + protective "
-                     "stop + target, placed as one bracket).")
-        ss.view = {"plan": plan, "bars": chart_bars,
-                   "support": candidate.support, "resistance": candidate.resistance,
-                   "marks": []}
-        return "\n\n".join(parts), {"plan": plan, "ai": ai}
-
-    # =====================================================================
-    # TECHNICAL PATTERNS  →  short-term day-trade view (why & how)
-    # =====================================================================
-    if direction is None:
-        direction = direction_of(candidate.pattern)
-        if not allowed(direction):
-            direction = forced or "long"
-
-    # 🔍 CHART-VISION: if a Groq key is set, render the chart and have the AI
-    # actually LOOK at it to name/confirm the pattern (overrides the rule-based
-    # read). Falls back silently if rendering or the call fails.
+    # 🔍 CHART-VISION: let a Groq model actually LOOK at the chart and, if it's
+    # confident, confirm or flip the direction. We only accept a flip if the
+    # rebuilt setup is still valid.
     vision = None
     if ss.groq_key:
         with st.spinner("🔍 AI is looking at the chart…"):
@@ -404,15 +450,31 @@ def build_trade():
                                         _secret("AI_VISION_MODEL", "").strip() or None)
     used_vision = bool(vision and vision.pattern
                        and vision.pattern.lower() not in ("none", "no clear pattern", ""))
+    direction = setup.direction
     if used_vision and vision.direction in ("long", "short") and allowed(vision.direction):
         direction = vision.direction
 
-    plan = build_trade_plan(
-        score=candidate, buying_power=buying_power, risk_pct=ss.risk_pct,
-        max_order_dollars=ss.max_order, stop_atr_mult=ss.stop_mult,
-        reward_risk=ss.reward_risk, direction=direction)
+    # Rebuild with the news score (and possibly the vision direction).
+    rebuilt = build_setup(sym, bars[sym], direction, buying_power, ss.risk_pct,
+                          ss.max_order, vol_ratio=getattr(candidate, "volume_ratio", 1.0),
+                          news_score=news_score, min_rr=ss.min_rr)
+    if rebuilt.ok:
+        setup = rebuilt
+    else:
+        # Vision's direction didn't validate — keep the original but re-score news.
+        rb2 = build_setup(sym, bars[sym], setup.direction, buying_power, ss.risk_pct,
+                          ss.max_order, vol_ratio=getattr(candidate, "volume_ratio", 1.0),
+                          news_score=news_score, min_rr=ss.min_rr)
+        if rb2.ok:
+            setup = rb2
+        used_vision = False
+
+    plan = _setup_to_plan(setup)
 
     parts = [f"### 📊 {sym} @ ${plan.entry:,.2f}"]
+    parts.append(f"**Market regime:** {setup.regime}")
+    conf_blocks = "█" * (setup.confidence // 10) + "░" * (10 - setup.confidence // 10)
+    parts.append(f"**Confidence: {setup.confidence}/100**  `{conf_blocks}`")
     if used_vision:
         vbadge = {"GO": "🟢", "CAUTION": "🟡", "NO-GO": "🔴"}.get(
             vision.recommendation, "🔍")
@@ -421,10 +483,8 @@ def build_trade():
                      f"{vbadge} {vision.recommendation}).")
         if vision.rationale:
             parts.append(f"_{vision.rationale}_")
-        parts.append(f"**The numbers:** {candidate.reason}")
     else:
-        pattern = candidate.pattern
-        parts.append(f"📐 **Setup found: {pattern}**")
+        parts.append(f"📐 **Setup found: {candidate.pattern}**")
         info = explain_setup(candidate.pattern, candidate.support,
                              candidate.resistance, plan.entry,
                              pattern_marks.get(sym, []))
@@ -433,17 +493,16 @@ def build_trade():
             parts.append(f"**How I found it:** {sym} shows {what}.\n\n"
                          f"**Why it's a signal:** {why}.\n\n"
                          f"**How to trade it:** {how}.")
-        parts.append(f"**The numbers:** {candidate.reason}")
-    if ai is not None and not used_vision:
-        badge = {"GO": "🟢", "CAUTION": "🟡", "NO-GO": "🔴"}.get(ai.recommendation, "🤖")
-        parts.append(f"🤖 **AI ({ai.confidence} confidence): {badge} "
-                     f"{ai.recommendation}** — {ai.rationale}")
+    if setup.reasons:
+        parts.append("**Why this trade:**\n" +
+                     "\n".join(f"- {r}" for r in setup.reasons))
+    parts.append(f"**News:** {sent_emoji} {sent_label.title()}")
+    if news:
+        parts.append("**📰 Recent headlines:**\n" +
+                     "\n".join(f"- {h}" + (f" ({s})" if s else "")
+                               for h, s in news[:3]))
     if market_open is False:
         parts.append("_Market is closed — the order will queue until it opens._")
-
-    if not plan.ok:
-        parts.append(f"⚠️ Can't build an order: {plan.skipped_reason}")
-        return "\n\n".join(parts), None
 
     if plan.direction == "short":
         action = f"🔻 **SHORT-SELL {plan.qty} share(s)**"
@@ -454,28 +513,27 @@ def build_trade():
         dir_note = "_Long = you profit if the price **rises**._"
         stop_side, tp_side = "below", "above"
 
+    entry_word = (f"LIMIT ${plan.limit_price:,.2f}" if plan.limit_price
+                  else f"~${plan.entry:,.2f}")
     parts.append(
         "**📋 Trade plan**\n"
-        f"- {action} of {plan.symbol} at ~${plan.entry:,.2f}  {dir_note}\n"
+        f"- {action} of {plan.symbol} at {entry_word}  {dir_note}\n"
         f"- 💵 Cost: **${plan.cost:,.2f}**\n"
-        f"- 🛑 Stop-loss: **${plan.stop:,.2f}** ({stop_side}, {plan.stop_pct:.1f}%) "
+        f"- 🛑 Stop-loss: **${plan.stop:,.2f}** ({stop_side} entry, {plan.stop_pct:.1f}%) "
         f"→ risk **${plan.risk_total:,.2f}** if it hits\n"
-        f"- 🎯 Take-profit: **${plan.take_profit:,.2f}** ({tp_side}, "
+        f"- 🎯 Take-profit: **${plan.take_profit:,.2f}** ({tp_side} entry, "
         f"{plan.tp_pct:.1f}%) → profit **${plan.reward_total:,.2f}** if it hits\n"
-        f"- ⚖️ Risk/reward: **1 : {plan.rr_ratio:g}**")
+        f"- ⚖️ Risk/reward: **1 : {plan.rr_ratio:g}**  _(min 1:{ss.min_rr:g})_")
     parts.append(
         f"📈 **[Open {plan.symbol} on TradingView]({tradingview_url(plan.symbol)})** "
-        "— chart with your levels below.\n\n"
-        "_On TradingView: Long Position tool → "
-        f"Entry ${plan.entry:,.2f} · Stop ${plan.stop:,.2f} · "
-        f"Target ${plan.take_profit:,.2f}._")
-    parts.append("Place it? Tap **✅ Yes** or **❌ No** (buy + stop-loss + "
+        "— chart with your levels below.")
+    parts.append("Place it? Tap **✅ Yes** or **❌ No** (entry + stop-loss + "
                  "take-profit, placed as one bracket).")
 
     ss.view = {"plan": plan, "bars": chart_bars,
                "support": candidate.support, "resistance": candidate.resistance,
                "marks": pattern_marks.get(sym, [])}
-    return "\n\n".join(parts), {"plan": plan, "ai": ai}
+    return "\n\n".join(parts), {"plan": plan, "ai": None}
 
 
 def place_pending() -> None:
@@ -537,16 +595,11 @@ def handle_command(text: str) -> None:
     if any(w in t for w in ("find", "scan", "trade", "buy something")):
         msg, pending = build_trade()
         if pending is not None and ss.auto_mode:
-            ai = pending.get("ai")
-            if ai is not None and ai.recommendation == "NO-GO":
-                ss.pending = None
-                say("assistant", msg + "\n\n🤖 **Auto mode:** the AI flagged this "
-                                        "**NO-GO**, so I skipped it. Type **find** "
-                                        "for another.")
-            else:
-                say("assistant", msg)   # show the plan
-                ss.pending = pending
-                place_pending()         # ...then place it automatically
+            # The engine only returns a trade that already passed the quality +
+            # reward:risk gate, so in auto mode we show it and place it.
+            say("assistant", msg)   # show the plan
+            ss.pending = pending
+            place_pending()         # ...then place it automatically
         else:
             ss.pending = pending
             say("assistant", msg)
@@ -583,8 +636,7 @@ def handle_command(text: str) -> None:
 # Slider-controlled settings default from config on first load.
 ss.setdefault("risk_pct", cfg.risk_pct)
 ss.setdefault("max_order", cfg.max_order_dollars)
-ss.setdefault("stop_mult", 1.5)
-ss.setdefault("reward_risk", 2.0)
+ss.setdefault("min_rr", MIN_RR)
 ss.setdefault("auto_mode", False)
 ss.setdefault("scan_mode", "Technical patterns")
 ss.setdefault("direction_mode", "Both")
@@ -668,22 +720,23 @@ with st.expander("⚙️ Trading settings"):
     ss.max_order = float(st.slider(
         "Max per order ($)", 500, 20000, int(ss.max_order), 500,
         help="Hard ceiling on any single order."))
-    ss.stop_mult = st.slider(
-        "Stop distance (× ATR)", 1.0, 3.0, float(ss.stop_mult), 0.5,
-        help="Wider = more room, fewer shares. Tighter = less risk per share.")
-    ss.reward_risk = st.slider(
-        "Reward : Risk", 1.0, 4.0, float(ss.reward_risk), 0.5,
-        help="Take-profit distance as a multiple of the stop distance.")
+    ss.min_rr = st.slider(
+        "Minimum reward : risk", 1.2, 4.0, float(ss.min_rr), 0.1,
+        help="The engine REJECTS any technical trade whose target isn't at "
+             "least this many times the risk away. Higher = pickier, fewer "
+             "but better trades (quality over quantity).")
     st.caption(f"Now: risk {ss.risk_pct*100:.2f}% · max ${ss.max_order:,.0f} · "
-               f"stop {ss.stop_mult:g}×ATR · reward:risk 1:{ss.reward_risk:g}")
+               f"reject below reward:risk 1:{ss.min_rr:g}  ·  stops from "
+               f"ATR + market structure (automatic).")
 
     st.markdown("---")
     ss.auto_mode = st.checkbox(
         "🤖 Auto mode — let the AI find AND place the trade by itself",
         value=ss.auto_mode,
-        help="When on, typing 'find' picks the best trade and places it "
-             "automatically (with stop-loss + take-profit) using your settings "
-             "above — no Yes/No. It skips a trade only if the AI says NO-GO.")
+        help="When on, typing 'find' picks the best validated trade and places "
+             "it automatically (with stop-loss + take-profit) using your settings "
+             "above — no Yes/No. If nothing passes the quality gate, it places "
+             "nothing.")
     if ss.auto_mode:
         if cfg.live:
             st.warning("⚠️ Auto mode with **LIVE** money places REAL orders with "

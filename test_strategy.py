@@ -27,15 +27,122 @@ class TestAnalysis(unittest.TestCase):
         from analysis import explain_setup
         self.assertIsNone(explain_setup("Range / no clear pattern", 1, 2, 1.5, []))
 
-    def test_invest_analysis_uptrend_is_good(self):
+    def test_invest_analysis_uptrend_is_a_buy(self):
         from analysis import invest_analysis
         bars = [Bar(close=100 + i, volume=1000, high=100 + i + 1, low=100 + i - 1)
                 for i in range(60)]
         a = invest_analysis(bars, atr=2.0)
-        self.assertEqual(a.verdict, "GOOD")
+        self.assertIn(a.verdict, ("BUY", "STRONG BUY"))
         self.assertGreater(a.perf_pct, 0)
         self.assertGreater(a.exp_return_pct, 0)
         self.assertGreater(a.downside_pct, 0)
+        self.assertTrue(a.reasons)
+
+    def test_invest_analysis_relative_strength_vs_benchmark(self):
+        from analysis import invest_analysis
+        stock = [Bar(close=100 + i, volume=1000, high=100 + i + 1, low=100 + i - 1)
+                 for i in range(60)]                    # +59%
+        flat = [Bar(close=100, volume=1000, high=101, low=99) for _ in range(60)]
+        a = invest_analysis(stock, atr=2.0, benchmark_bars=flat)
+        self.assertGreater(a.rel_strength, 0)           # beats a flat market
+
+    def test_news_sentiment_labels(self):
+        from analysis import news_sentiment
+        bull = news_sentiment([("Company beats earnings, surges to record", "x")])
+        bear = news_sentiment([("Company misses, faces lawsuit and probe", "x")])
+        none = news_sentiment([])
+        self.assertEqual(bull[0], "BULLISH")
+        self.assertEqual(bear[0], "BEARISH")
+        self.assertEqual(none[0], "NONE")
+
+
+class TestEngine(unittest.TestCase):
+    """The professional core: regime, validated geometry, R:R gate, sizing."""
+
+    @staticmethod
+    def _uptrend_bars(n=60, start=100.0):
+        closes = [start]
+        step = [2.0, -1.0]
+        for i in range(n - 1):
+            closes.append(closes[-1] + step[i % 2])
+        return [Bar(close=c, volume=1000, high=c + 1.2, low=c - 1.2) for c in closes]
+
+    def test_regime_detects_uptrend(self):
+        from engine import detect_regime
+        r = detect_regime(self._uptrend_bars())
+        self.assertEqual(r.bias, "up")
+
+    def test_long_setup_geometry_is_valid(self):
+        from engine import build_setup
+        s = build_setup("UP", self._uptrend_bars(), "long", buying_power=100_000,
+                        risk_pct=0.01, max_order_dollars=5000)
+        if s.ok:   # a valid long must have stop < entry < target
+            self.assertLess(s.stop, s.entry)
+            self.assertLess(s.entry, s.target)
+            self.assertEqual(s.side, "buy")
+
+    def test_never_buy_stop_above_entry(self):
+        # Across many synthetic longs, a BUY stop is NEVER at/above entry.
+        from engine import build_setup
+        for shift in range(0, 40, 3):
+            bars = self._uptrend_bars(start=50 + shift)
+            s = build_setup("X", bars, "long", 100_000, 0.01, 5000)
+            if s.ok:
+                self.assertLess(s.stop, s.entry,
+                                f"BUY stop {s.stop} not below entry {s.entry}")
+
+    def test_never_sell_stop_below_entry(self):
+        from engine import build_setup
+        closes = [Bar(close=c, volume=1000, high=c + 1.2, low=c - 1.2)
+                  for c in [160 - i * 0.8 for i in range(60)]]
+        s = build_setup("DN", closes, "short", 100_000, 0.01, 5000)
+        if s.ok:
+            self.assertGreater(s.stop, s.entry)   # SELL stop ABOVE entry
+            self.assertLess(s.target, s.entry)    # SELL target BELOW entry
+            self.assertEqual(s.side, "sell")
+
+    def test_reward_risk_gate_rejects_low_rr(self):
+        # An impossibly high min_rr must be rejected, never forced.
+        from engine import build_setup
+        s = build_setup("UP", self._uptrend_bars(), "long", 100_000, 0.01, 5000,
+                        min_rr=99.0)
+        self.assertFalse(s.ok)
+        self.assertTrue(s.rejected)
+        self.assertIn("reward:risk", s.reject_reason.lower())
+
+    def test_valid_setup_meets_min_rr(self):
+        from engine import build_setup
+        s = build_setup("UP", self._uptrend_bars(), "long", 100_000, 0.01, 5000,
+                        min_rr=1.6)
+        if s.ok:
+            self.assertGreaterEqual(s.rr, 1.6)
+            self.assertGreater(s.qty, 0)
+            self.assertTrue(0 <= s.confidence <= 100)
+
+    def test_rejects_when_no_history(self):
+        from engine import build_setup
+        s = build_setup("TINY", self._uptrend_bars(n=5), "long", 100_000, 0.01, 5000)
+        self.assertFalse(s.ok)
+        self.assertTrue(s.rejected)
+
+
+class TestBacktest(unittest.TestCase):
+    def test_backtest_runs_and_reports(self):
+        from backtest import backtest
+        closes = [100.0]
+        step = [2.0, -1.0]
+        for i in range(120):
+            closes.append(closes[-1] + step[i % 2])
+        bars = [Bar(close=c, volume=1000, high=c + 1.2, low=c - 1.2) for c in closes]
+        result = backtest({"UP": bars})
+        self.assertGreaterEqual(result.n, 0)          # never crashes
+        for t in result.trades:                       # every trade is coherent
+            self.assertIn(t.outcome, ("win", "loss", "timeout"))
+            if t.direction == "long":
+                self.assertLess(t.stop, t.entry)      # never a wrong-side stop
+            else:
+                self.assertGreater(t.stop, t.entry)
+        self.assertIsInstance(result.summary(), str)
 
 
 class TestPatterns(unittest.TestCase):

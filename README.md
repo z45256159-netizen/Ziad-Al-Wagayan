@@ -33,13 +33,19 @@ enable live trading.**
 
 ```
 .
+├── streamlit_app.py  # ★ The phone-friendly chat website (recommended)
+├── engine.py         # ★ Professional trade core: regime, structure stops, R:R gate
 ├── bot.py            # Interactive loop / entry point (the CLI)
-├── strategy.py       # ★ Swappable strategy (SMA crossover + RSI + MACD + volume)
+├── strategy.py       # ★ Candidate scanner (SMA crossover + RSI + MACD + volume)
+├── analysis.py       # Long-term investing read + news sentiment + explanations
 ├── broker.py         # All Alpaca API calls (data + trading) live here
-├── sizing.py         # Position sizing & risk rules
+├── sizing.py         # Position sizing & risk rules (the trade-plan dataclass)
+├── backtest.py       # Walk-forward backtester over historical bars
+├── chart.py          # Candlestick chart (Plotly) + chart image for AI vision
+├── ai.py             # Optional free Groq AI (text pick + chart vision)
 ├── universe.py       # ★ The editable list of tickers to scan
 ├── config.py         # Loads/validates settings from .env
-├── test_strategy.py  # Unit tests for scoring + sizing (no API needed)
+├── test_strategy.py  # Unit tests for the engine, scoring & sizing (no API needed)
 ├── requirements.txt
 ├── .env.example      # Copy to .env and fill in your keys
 └── .gitignore        # Excludes your real .env
@@ -119,9 +125,38 @@ visit — straight to the chat, no form:
 
 ### 🧠 The bot already has a brain (no AI needed)
 
-The **momentum + volume scanner is the decision-maker** — it picks the trade,
-sizes it, and skips tickers you already hold, entirely on its own. You can trade
-with it and never turn on any AI. The AI below is an optional *second opinion*.
+The **momentum + volume scanner** shortlists movers, then `engine.py` — the
+professional core — decides whether any of them is actually worth trading. You
+can trade with it and never turn on any AI. The AI further down is an optional
+*second opinion*.
+
+**What the engine does (Technical mode):**
+
+- **Market-regime detection** — reads trend strength (ADX), volatility (ATR%),
+  and bias (moving-average structure) so the logic adapts instead of using one
+  fixed rule.
+- **Realistic stop-loss** — placed at real market structure (the recent swing
+  low for a long, swing high for a short) plus an ATR buffer, clamped to sane
+  bounds. A **BUY stop is never above entry**; a **SELL stop is never below
+  entry** — this is validated before anything is ever recommended.
+- **Structure-based take-profit** — aimed at the nearest real swing level in the
+  trade's direction, not a made-up number.
+- **Hard reward:risk gate** — if the best honest target isn't far enough away to
+  clear your **minimum reward:risk** (slider in Settings), the trade is
+  **rejected, not forced**. When nothing on the watchlist qualifies, the app
+  says *"No trade right now — quality over quantity"* rather than inventing one.
+- **Confidence score (0–100)** with plain-English reasons for *why*, blending
+  trend alignment, R:R, volume, momentum (RSI), volatility, and news sentiment.
+
+**Best-performers (investing) mode** is a different read entirely: long-term
+trend structure, 3-month and 1-year performance, **relative strength vs the S&P
+500 (SPY)**, drawdown, and news sentiment → a STRONG BUY / BUY / HOLD / AVOID
+verdict with a quality score and reasons. (These are price-based estimates for
+learning, not a substitute for company fundamentals.)
+
+**Backtesting:** `python backtest.py` walks historical bars and simulates the
+engine's trades, reporting win rate, average R multiple, expectancy, and profit
+factor — an honest what-if on daily data, not a promise of future results.
 
 ### 🤖 Optional: let a FREE AI pick the trade
 

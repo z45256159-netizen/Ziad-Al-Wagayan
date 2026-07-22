@@ -155,66 +155,151 @@ def explain_setup(label: str, support: float, resistance: float, entry: float,
     return None
 
 
-_POS_WORDS = ("beat", "beats", "surge", "surges", "record", "jumps", "jump",
-              "upgrade", "upgraded", "raises", "raise", "growth", "strong",
-              "rally", "wins", "win", "approval", "approved", "gains", "gain",
-              "soars", "soar", "outperform", "buy", "high", "boost", "profit",
-              "tops", "rises", "rise", "positive", "expands", "deal")
-_NEG_WORDS = ("miss", "misses", "falls", "fall", "plunge", "plunges", "drop",
-              "drops", "cuts", "cut", "downgrade", "downgraded", "lawsuit",
-              "probe", "recall", "warning", "warn", "weak", "loss", "losses",
-              "slump", "layoffs", "investigation", "sell", "sinks", "sink",
-              "declines", "decline", "concern", "risk", "halts", "delay")
+# Weighted lexicon: term -> strength (positive = bullish, negative = bearish).
+_LEXICON = {
+    # strong bullish
+    "beats": 2, "beat": 2, "surge": 2, "surges": 2, "record": 2, "soars": 2,
+    "soar": 2, "upgrade": 2, "upgraded": 2, "raises guidance": 3, "raises": 2,
+    "breakout": 2, "acquires": 2, "buyback": 2, "outperform": 2, "tops": 2,
+    # mild bullish
+    "growth": 1, "strong": 1, "rally": 1, "gains": 1, "gain": 1, "rises": 1,
+    "rise": 1, "approval": 1, "approved": 1, "profit": 1, "expands": 1,
+    "deal": 1, "partnership": 1, "wins": 1, "boost": 1, "higher": 1, "jumps": 1,
+    "positive": 1, "bullish": 2, "buy rating": 2, "price target raised": 2,
+    # strong bearish
+    "misses": -2, "miss": -2, "plunge": -2, "plunges": -2, "crash": -3,
+    "downgrade": -2, "downgraded": -2, "lawsuit": -2, "probe": -2, "recall": -2,
+    "investigation": -2, "fraud": -3, "bankruptcy": -3, "layoffs": -2,
+    "cuts guidance": -3, "guidance cut": -3, "sell rating": -2,
+    # mild bearish
+    "falls": -1, "fall": -1, "drop": -1, "drops": -1, "cuts": -1, "cut": -1,
+    "warning": -1, "warn": -1, "weak": -1, "loss": -1, "losses": -1, "slump": -1,
+    "declines": -1, "decline": -1, "concern": -1, "risk": -1, "halts": -1,
+    "delay": -1, "lower": -1, "sinks": -1, "bearish": -2, "price target cut": -2,
+}
+_NEGATORS = ("no ", "not ", "n't", "without ", "avoids ", "denies ")
 
 
 def news_sentiment(headlines):
-    """Rough good/bad read of news from headline keywords (heuristic).
-    Returns (label, emoji, score). label in GOOD/MIXED/BAD/NONE."""
+    """
+    Read whether news leans BULLISH / BEARISH / NEUTRAL (weighted, with simple
+    negation), from Alpaca/Benzinga headlines.
+    Returns (label, emoji, score). label in BULLISH/BEARISH/NEUTRAL/NONE.
+    """
     if not headlines:
         return ("NONE", "⚪", 0)
-    text = " ".join(h.lower() for h, _ in headlines)
-    pos = sum(text.count(w) for w in _POS_WORDS)
-    neg = sum(text.count(w) for w in _NEG_WORDS)
-    score = pos - neg
-    if score > 0:
-        return ("GOOD", "🟢", score)
-    if score < 0:
-        return ("BAD", "🔴", score)
-    return ("MIXED", "🟡", score)
+    total = 0
+    for headline, _ in headlines:
+        h = " " + headline.lower() + " "
+        for term, weight in _LEXICON.items():
+            idx = h.find(term)
+            while idx != -1:
+                # crude negation: flip weight if a negator sits just before it
+                pre = h[max(0, idx - 8):idx]
+                w = -weight if any(neg in pre for neg in _NEGATORS) else weight
+                total += w
+                idx = h.find(term, idx + len(term))
+    if total >= 2:
+        return ("BULLISH", "🟢", total)
+    if total <= -2:
+        return ("BEARISH", "🔴", total)
+    return ("NEUTRAL", "🟡", total)
+
+
+def _perf(closes, back):
+    if len(closes) <= back or closes[-back - 1] <= 0:
+        base = closes[0]
+    else:
+        base = closes[-back - 1]
+    return (closes[-1] - base) / base * 100 if base > 0 else 0.0
+
+
+def _max_drawdown(closes) -> float:
+    peak = closes[0]
+    mdd = 0.0
+    for c in closes:
+        peak = max(peak, c)
+        mdd = min(mdd, (c - peak) / peak * 100 if peak else 0.0)
+    return mdd
 
 
 @dataclass
 class InvestAnalysis:
     perf_pct: float          # ~3-month price change, %
-    verdict: str             # GOOD / OKAY / AVOID
-    horizon: str             # suggested holding period
-    exp_return_pct: float    # rough expected upside, %
-    downside_pct: float      # rough downside risk, %
+    perf_1y_pct: float       # ~12-month change, %
+    rel_strength: float      # stock 3m return minus benchmark 3m return, %
+    verdict: str             # STRONG BUY / BUY / HOLD / AVOID
+    score: int               # 0-100 quality score
+    reasons: List[str]
+    horizon: str
+    exp_return_pct: float
+    downside_pct: float
     reason: str
 
 
-def invest_analysis(bars: List[Bar], atr: float) -> InvestAnalysis:
-    """A rough long-term read from the price history. Estimates, not forecasts."""
+def invest_analysis(bars: List[Bar], atr: float,
+                    benchmark_bars: Optional[List[Bar]] = None) -> InvestAnalysis:
+    """
+    A long-term quality read from price behaviour: trend structure, 3m & 1y
+    performance, relative strength vs the market (SPY), volatility and drawdown.
+    Estimates for learning — not forecasts, and not a substitute for fundamentals.
+    """
     closes = [b.close for b in bars]
     n = len(closes)
     last = closes[-1]
-    base = closes[-60] if n >= 60 else closes[0]
-    perf = (last - base) / base * 100 if base > 0 else 0.0
-    sma_slow = sum(closes[-50:]) / min(50, n)
-    up = last > sma_slow
+    perf_3m = _perf(closes, 60)
+    perf_1y = _perf(closes, min(252, n - 1))
+    sma50 = sum(closes[-50:]) / min(50, n)
+    sma200 = sum(closes[-200:]) / min(200, n)
+    above_50 = last > sma50
+    above_200 = last > sma200
+    uptrend = above_50 and above_200 and sma50 >= sma200
     atr_pct = (atr / last * 100) if last > 0 else 2.0
+    mdd = _max_drawdown(closes[-min(252, n):])
 
-    if up and perf > 8:
-        verdict = "GOOD"
-    elif up:
-        verdict = "OKAY"
+    rel = 0.0
+    if benchmark_bars:
+        b_closes = [b.close for b in benchmark_bars]
+        rel = perf_3m - _perf(b_closes, 60)
+
+    # Quality score (0-100) with reasons.
+    score = 45
+    reasons = []
+    if uptrend:
+        score += 18; reasons.append("✅ long-term uptrend (above rising 50 & 200-day averages)")
+    elif above_50:
+        score += 6; reasons.append("🟡 above the 50-day average but not clearly trending")
+    else:
+        score -= 18; reasons.append("⚠️ below its 50-day average (downtrend)")
+    if rel > 3:
+        score += 14; reasons.append(f"✅ outperforming the market by {rel:+.0f}% (3m)")
+    elif rel < -3:
+        score -= 10; reasons.append(f"⚠️ lagging the market by {rel:+.0f}% (3m)")
+    if perf_1y > 15:
+        score += 8; reasons.append(f"✅ strong 1-year return ({perf_1y:+.0f}%)")
+    elif perf_1y < -10:
+        score -= 8; reasons.append(f"⚠️ negative 1-year return ({perf_1y:+.0f}%)")
+    if mdd < -35:
+        score -= 8; reasons.append(f"⚠️ deep past drawdown ({mdd:.0f}%) — volatile")
+    if atr_pct > 4:
+        score -= 4; reasons.append("⚠️ high volatility")
+
+    score = max(0, min(100, int(score)))
+    if score >= 75 and uptrend:
+        verdict = "STRONG BUY"
+    elif score >= 60:
+        verdict = "BUY"
+    elif score >= 45:
+        verdict = "HOLD"
     else:
         verdict = "AVOID"
 
-    # Rough scenario numbers, clearly labeled as estimates elsewhere.
-    exp_return = max(4.0, min(perf * 0.4, 25.0)) if up else 0.0
-    downside = max(6.0, min(atr_pct * 4, 20.0))
-    horizon = "a few weeks to a few months"
-    reason = (f"{'Up' if up else 'Down'}trend vs its 50-day average; "
-              f"{perf:+.0f}% over ~3 months; typical daily swing ~{atr_pct:.1f}%.")
-    return InvestAnalysis(perf, verdict, horizon, exp_return, downside, reason)
+    exp_return = max(5.0, min(perf_1y * 0.3 + rel * 0.3, 30.0)) if uptrend else 4.0
+    downside = max(8.0, min(abs(mdd) * 0.4 + atr_pct * 3, 25.0))
+    horizon = "months (long-term hold)"
+    reason = (f"3-month {perf_3m:+.0f}%, 1-year {perf_1y:+.0f}%, "
+              f"{'above' if above_200 else 'below'} its 200-day average; "
+              f"{'leads' if rel >= 0 else 'lags'} the market by {rel:+.0f}%.")
+    return InvestAnalysis(round(perf_3m, 1), round(perf_1y, 1), round(rel, 1),
+                          verdict, score, reasons, horizon,
+                          round(exp_return, 1), round(downside, 1), reason)
