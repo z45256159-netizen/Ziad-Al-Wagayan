@@ -17,10 +17,11 @@ import random
 
 import streamlit as st
 from ai import ai_choose, verify_key
+from analysis import explain_pattern, invest_analysis
 from broker import Broker, BrokerError
 from chart import make_position_chart, tradingview_url
 from config import Config, ConfigError
-from sizing import build_trade_plan
+from sizing import TradePlan, build_trade_plan
 from strategy import detect_pattern, direction_of, rank_relaxed
 from universe import UNIVERSE
 
@@ -249,20 +250,21 @@ def build_trade():
     def allowed(d: str) -> bool:
         return d in ("long", "short") if forced is None else d == forced
 
-    if ss.scan_mode == "Best performers":
-        # Ignore patterns — take the strongest movers (or weakest, to short).
-        want_short = (dmode == "Short only")
-        ordered = sorted(tradeable, key=lambda c: c.score, reverse=not want_short)
+    investing = (ss.scan_mode == "Best performers")
+
+    if investing:
+        # Long-term: rank by ~3-month performance, buy the leaders.
+        def perf(c):
+            b = bars[c.symbol]
+            base = b[-60].close if len(b) >= 60 else b[0].close
+            return (b[-1].close - base) / base if base > 0 else 0.0
+        ordered = sorted(tradeable, key=perf, reverse=True)
         pool = [c for c in ordered if c.symbol not in ss.recent] or ordered
         pool_top = pool[:8]
-        direction = "short" if want_short else "long"
+        direction = "long"
     else:
-        # Technical patterns — prefer stocks with a recognized setup that matches
-        # the chosen direction.
         fresh = [c for c in tradeable if c.symbol not in ss.recent]
         pool_top = (fresh if fresh else tradeable)[:10]
-        setups = [c for c in pool_top if allowed(direction_of(c.pattern))]
-        pool_top = setups if setups else pool_top
         direction = None  # decided per-candidate below
 
     # Detect chart pattern for each candidate in the working pool (for the chart).
@@ -272,7 +274,12 @@ def build_trade():
         c.pattern = label
         pattern_marks[c.symbol] = marks
 
-    # Weighted-random pick so 'find' gives DIFFERENT answers each time.
+    # Technical: prefer setups matching the allowed direction.
+    if not investing:
+        setups = [c for c in pool_top if allowed(direction_of(c.pattern))]
+        if setups:
+            pool_top = setups
+
     weights = [max(abs(c.score), 1e-4) for c in pool_top]
     candidate = random.choices(pool_top, weights=weights, k=1)[0]
 
@@ -290,32 +297,86 @@ def build_trade():
     except BrokerError as exc:
         return f"⚠️ Couldn't read your buying power: {exc}", None
 
-    if direction is None:  # patterns mode: use the pattern's direction
+    ss.recent = ([candidate.symbol] + ss.recent)[:3]
+    sym = candidate.symbol
+    chart_bars = bars[sym][-40:]
+
+    # =====================================================================
+    # BEST PERFORMERS  →  long-term investing view (verdict, horizon, news)
+    # =====================================================================
+    if investing:
+        a = invest_analysis(bars[sym], candidate.atr)
+        entry = round(candidate.last_price, 2)
+        budget = min(0.10 * buying_power, ss.max_order * 3, buying_power)
+        qty = int(budget // entry) or (1 if entry <= buying_power else 0)
+        if qty < 1:
+            return (f"One share of {sym} (${entry:,.2f}) is more than your "
+                    "buying power."), None
+        exp_pct = a.exp_return_pct if a.exp_return_pct > 0 else a.downside_pct * 1.2
+        stop = round(entry * (1 - a.downside_pct / 100), 2)
+        target = round(entry * (1 + exp_pct / 100), 2)
+        risk_total = round(qty * (entry - stop), 2)
+        reward_total = round(qty * (target - entry), 2)
+        rr = round(reward_total / risk_total, 2) if risk_total else 0.0
+        plan = TradePlan(sym, qty, entry, stop, target, round(qty * entry, 2),
+                         risk_total, reward_total, rr, a.downside_pct, exp_pct,
+                         side="buy", direction="long")
+
+        emoji = {"GOOD": "🟢", "OKAY": "🟡", "AVOID": "🔴"}.get(a.verdict, "🟡")
+        parts = [f"### 📈 {sym} — long-term pick @ ${entry:,.2f}"]
+        parts.append(f"**Verdict: {emoji} {a.verdict}** · {a.perf_pct:+.0f}% "
+                     "over ~3 months")
+        parts.append(f"**Why:** {a.reason}")
+        parts.append(
+            "**📊 Plan (buy & hold)**\n"
+            f"- 🟢 **Buy {qty} share(s)** of {sym} (~${plan.cost:,.2f}) — "
+            f"{plan.cost / buying_power * 100:.0f}% of buying power\n"
+            f"- ⏳ Suggested hold: **{a.horizon}**\n"
+            f"- 📈 If it keeps its pace: **~+{exp_pct:.0f}%** (≈ +${reward_total:,.0f}) "
+            f"→ target ${target:,.2f}\n"
+            f"- 📉 Downside if wrong: **~-{a.downside_pct:.0f}%** (≈ -${risk_total:,.0f}) "
+            f"→ protective stop ${stop:,.2f}\n"
+            f"- ⚖️ Reward:risk ≈ **1 : {rr:g}**")
+        news = broker.get_news(sym)
+        if news:
+            parts.append("**📰 Recent news:**\n" +
+                         "\n".join(f"- {h}" + (f" ({s})" if s else "")
+                                   for h, s in news))
+        else:
+            parts.append("_No recent news found for this ticker._")
+        parts.append("_These are rough estimates for learning, not guarantees._")
+        if market_open is False:
+            parts.append("_Market is closed — the order will queue until it opens._")
+        parts.append("Place it? Tap **✅ Yes** or **❌ No** (buy + protective stop "
+                     "+ target, placed as one bracket).")
+        ss.view = {"plan": plan, "bars": chart_bars,
+                   "support": candidate.support, "resistance": candidate.resistance,
+                   "marks": []}
+        return "\n\n".join(parts), {"plan": plan, "ai": ai}
+
+    # =====================================================================
+    # TECHNICAL PATTERNS  →  short-term day-trade view (why & how)
+    # =====================================================================
+    if direction is None:
         direction = direction_of(candidate.pattern)
         if not allowed(direction):
             direction = forced or "long"
 
     plan = build_trade_plan(
-        score=candidate,
-        buying_power=buying_power,
-        risk_pct=ss.risk_pct,
-        max_order_dollars=ss.max_order,
-        stop_atr_mult=ss.stop_mult,
-        reward_risk=ss.reward_risk,
-        direction=direction,
-    )
+        score=candidate, buying_power=buying_power, risk_pct=ss.risk_pct,
+        max_order_dollars=ss.max_order, stop_atr_mult=ss.stop_mult,
+        reward_risk=ss.reward_risk, direction=direction)
 
-    # Remember this ticker so the next scan tends to pick something different.
-    ss.recent = ([candidate.symbol] + ss.recent)[:3]
-
-    # The pattern to headline: the AI's read if present, else the detected one.
-    pattern = (ai.pattern if (ai is not None and ai.pattern)
-               else candidate.pattern)
-
-    # ---- Build the full, trader-style message ----
-    parts = [f"### 📊 {candidate.symbol} @ ${plan.entry:,.2f}"]
+    pattern = (ai.pattern if (ai is not None and ai.pattern) else candidate.pattern)
+    parts = [f"### 📊 {sym} @ ${plan.entry:,.2f}"]
     parts.append(f"📐 **Setup found: {pattern}**")
-    parts.append(f"**Why this stock:** {candidate.reason}")
+    info = explain_pattern(candidate.pattern)
+    if info:
+        what, why, how = info
+        parts.append(f"**How I found it:** {sym} is showing {what}.\n\n"
+                     f"**Why it's a signal:** {why}.\n\n"
+                     f"**How to trade it:** {how}.")
+    parts.append(f"**The numbers:** {candidate.reason}")
     if ai is not None:
         badge = {"GO": "🟢", "CAUTION": "🟡", "NO-GO": "🔴"}.get(ai.recommendation, "🤖")
         parts.append(f"🤖 **AI ({ai.confidence} confidence): {badge} "
@@ -344,24 +405,19 @@ def build_trade():
         f"→ risk **${plan.risk_total:,.2f}** if it hits\n"
         f"- 🎯 Take-profit: **${plan.take_profit:,.2f}** ({tp_side}, "
         f"{plan.tp_pct:.1f}%) → profit **${plan.reward_total:,.2f}** if it hits\n"
-        f"- ⚖️ Risk/reward: **1 : {plan.rr_ratio:g}**"
-    )
+        f"- ⚖️ Risk/reward: **1 : {plan.rr_ratio:g}**")
     parts.append(
         f"📈 **[Open {plan.symbol} on TradingView]({tradingview_url(plan.symbol)})** "
-        "— the chart with your levels is drawn below.\n\n"
-        "_To draw it there yourself: tap the **Long Position** tool (the ⊕/ruler "
-        f"icon), then set **Entry ${plan.entry:,.2f} · Stop ${plan.stop:,.2f} · "
-        f"Target ${plan.take_profit:,.2f}**. (TradingView can't pre-draw it from a "
-        "link — the box below is the same thing, already drawn.)_")
-    parts.append("Place it? Tap **✅ Yes** or **❌ No** below (or type yes / no). "
-                 "Placing sends **3 orders at once** (a bracket): a buy, a "
-                 "stop-loss sell, and a take-profit sell — the exits fire "
-                 "automatically.")
+        "— chart with your levels below.\n\n"
+        "_On TradingView: Long Position tool → "
+        f"Entry ${plan.entry:,.2f} · Stop ${plan.stop:,.2f} · "
+        f"Target ${plan.take_profit:,.2f}._")
+    parts.append("Place it? Tap **✅ Yes** or **❌ No** (buy + stop-loss + "
+                 "take-profit, placed as one bracket).")
 
-    # Stash the chart (last ~40 bars of the chosen ticker) for rendering.
-    ss.view = {"plan": plan, "bars": bars[candidate.symbol][-40:],
+    ss.view = {"plan": plan, "bars": chart_bars,
                "support": candidate.support, "resistance": candidate.resistance,
-               "marks": pattern_marks.get(candidate.symbol, [])}
+               "marks": pattern_marks.get(sym, [])}
     return "\n\n".join(parts), {"plan": plan, "ai": ai}
 
 
@@ -556,6 +612,14 @@ with st.expander("⚙️ Trading settings"):
         ss.auto_tried = False
         ss.ls_tried = False
         st.rerun()
+
+# Current-mode badge so you always know what 'find' will do.
+_mode_icon = "📈 Investing (best performers)" if ss.scan_mode == "Best performers" \
+    else "📐 Technical (patterns)"
+_dir_icon = {"Both": "↔ Long & Short", "Long only": "🟢 Long only",
+             "Short only": "🔻 Short only"}.get(ss.direction_mode, ss.direction_mode)
+st.caption(f"🔎 Mode: **{_mode_icon}**  ·  {_dir_icon}  "
+           f"·  {'🤖 Auto' if ss.auto_mode else '✋ Manual'}")
 
 st.divider()
 

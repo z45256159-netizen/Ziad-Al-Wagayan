@@ -12,6 +12,28 @@ from strategy import (Bar, detect_pattern, direction_of, find_candidate,
                       rank_candidates, rank_relaxed, score_symbol)
 
 
+class TestAnalysis(unittest.TestCase):
+    def test_explain_pattern_known(self):
+        from analysis import explain_pattern
+        info = explain_pattern("Double bottom")
+        self.assertIsNotNone(info)
+        self.assertEqual(len(info), 3)  # what, why, how
+
+    def test_explain_pattern_unknown(self):
+        from analysis import explain_pattern
+        self.assertIsNone(explain_pattern("Range / no clear pattern"))
+
+    def test_invest_analysis_uptrend_is_good(self):
+        from analysis import invest_analysis
+        bars = [Bar(close=100 + i, volume=1000, high=100 + i + 1, low=100 + i - 1)
+                for i in range(60)]
+        a = invest_analysis(bars, atr=2.0)
+        self.assertEqual(a.verdict, "GOOD")
+        self.assertGreater(a.perf_pct, 0)
+        self.assertGreater(a.exp_return_pct, 0)
+        self.assertGreater(a.downside_pct, 0)
+
+
 class TestPatterns(unittest.TestCase):
     def test_breakout_detected(self):
         bars = [Bar(close=100 + i, volume=1000, high=100 + i + 1, low=100 + i - 1)

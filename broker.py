@@ -19,6 +19,13 @@ from typing import Dict, List, Optional
 from alpaca.data.enums import DataFeed
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
+
+try:
+    from alpaca.data.historical.news import NewsClient
+    from alpaca.data.requests import NewsRequest
+    _NEWS_AVAILABLE = True
+except Exception:  # pragma: no cover - older SDKs
+    _NEWS_AVAILABLE = False
 from alpaca.data.timeframe import TimeFrame
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderClass, OrderSide, TimeInForce
@@ -52,6 +59,13 @@ class Broker:
             api_key=config.api_key,
             secret_key=config.api_secret,
         )
+        self.news = None
+        if _NEWS_AVAILABLE:
+            try:
+                self.news = NewsClient(api_key=config.api_key,
+                                       secret_key=config.api_secret)
+            except Exception:  # pragma: no cover
+                self.news = None
 
     # ------------------------------------------------------------------ account
     def get_account(self):
@@ -128,6 +142,35 @@ class Broker:
                 for b in recent
             ]
         return result
+
+    def get_news(self, symbol: str, limit: int = 4):
+        """Recent news headlines for a symbol: list of (headline, source).
+        Best-effort — returns [] if news isn't available."""
+        if self.news is None:
+            return []
+        try:
+            result = self.news.get_news(NewsRequest(symbols=symbol, limit=limit))
+        except Exception:
+            return []
+        # Extract the list of news items across possible SDK response shapes.
+        items = None
+        for attr in ("news",):
+            items = getattr(result, attr, None)
+            if items:
+                break
+        if items is None:
+            data = getattr(result, "data", None)
+            if isinstance(data, dict):
+                items = data.get("news") or []
+        out = []
+        for it in (items or [])[:limit]:
+            headline = getattr(it, "headline", None) or (
+                it.get("headline") if isinstance(it, dict) else None)
+            source = getattr(it, "source", None) or (
+                it.get("source") if isinstance(it, dict) else "") or ""
+            if headline:
+                out.append((headline, source))
+        return out
 
     def get_last_price(self, symbol: str) -> Optional[float]:
         """Best-effort latest price from the most recent daily bar."""
