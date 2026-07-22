@@ -155,6 +155,34 @@ def explain_setup(label: str, support: float, resistance: float, entry: float,
     return None
 
 
+_POS_WORDS = ("beat", "beats", "surge", "surges", "record", "jumps", "jump",
+              "upgrade", "upgraded", "raises", "raise", "growth", "strong",
+              "rally", "wins", "win", "approval", "approved", "gains", "gain",
+              "soars", "soar", "outperform", "buy", "high", "boost", "profit",
+              "tops", "rises", "rise", "positive", "expands", "deal")
+_NEG_WORDS = ("miss", "misses", "falls", "fall", "plunge", "plunges", "drop",
+              "drops", "cuts", "cut", "downgrade", "downgraded", "lawsuit",
+              "probe", "recall", "warning", "warn", "weak", "loss", "losses",
+              "slump", "layoffs", "investigation", "sell", "sinks", "sink",
+              "declines", "decline", "concern", "risk", "halts", "delay")
+
+
+def news_sentiment(headlines):
+    """Rough good/bad read of news from headline keywords (heuristic).
+    Returns (label, emoji, score). label in GOOD/MIXED/BAD/NONE."""
+    if not headlines:
+        return ("NONE", "⚪", 0)
+    text = " ".join(h.lower() for h, _ in headlines)
+    pos = sum(text.count(w) for w in _POS_WORDS)
+    neg = sum(text.count(w) for w in _NEG_WORDS)
+    score = pos - neg
+    if score > 0:
+        return ("GOOD", "🟢", score)
+    if score < 0:
+        return ("BAD", "🔴", score)
+    return ("MIXED", "🟡", score)
+
+
 @dataclass
 class InvestAnalysis:
     perf_pct: float          # ~3-month price change, %

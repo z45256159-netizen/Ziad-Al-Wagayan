@@ -40,6 +40,7 @@ class TradePlan:
     skipped_reason: Optional[str] = None
     side: str = "buy"       # "buy" (long) or "sell" (short)
     direction: str = "long"  # "long" or "short"
+    limit_price: Optional[float] = None  # set => LIMIT entry, else market
 
     @property
     def ok(self) -> bool:

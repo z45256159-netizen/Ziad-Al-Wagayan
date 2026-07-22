@@ -30,6 +30,7 @@ from alpaca.data.timeframe import TimeFrame
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderClass, OrderSide, TimeInForce
 from alpaca.trading.requests import (
+    LimitOrderRequest,
     MarketOrderRequest,
     StopLossRequest,
     TakeProfitRequest,
@@ -197,24 +198,28 @@ class Broker:
 
     def submit_bracket_order(
         self, symbol: str, qty: int, take_profit: float, stop_loss: float,
-        side: str = "buy",
+        side: str = "buy", limit_price: Optional[float] = None,
     ) -> object:
         """
-        Submit a BRACKET order: a market entry (BUY to go long, SELL to short)
-        that automatically attaches a take-profit limit and a stop-loss. Once the
-        entry fills, Alpaca manages both exits (whichever hits first cancels the
-        other).
+        Submit a BRACKET order that attaches a take-profit and a stop-loss.
+        If `limit_price` is given, the entry is a LIMIT order (fills only at that
+        price or better — e.g. "buy on a dip to $190"); otherwise a MARKET entry
+        (fills now). Once the entry fills, Alpaca manages both exits.
         """
         order_side = OrderSide.SELL if side == "sell" else OrderSide.BUY
-        order_data = MarketOrderRequest(
+        common = dict(
             symbol=symbol,
             qty=qty,
             side=order_side,
-            time_in_force=TimeInForce.DAY,
+            time_in_force=TimeInForce.GTC if limit_price else TimeInForce.DAY,
             order_class=OrderClass.BRACKET,
             take_profit=TakeProfitRequest(limit_price=round(take_profit, 2)),
             stop_loss=StopLossRequest(stop_price=round(stop_loss, 2)),
         )
+        if limit_price:
+            order_data = LimitOrderRequest(limit_price=round(limit_price, 2), **common)
+        else:
+            order_data = MarketOrderRequest(**common)
         try:
             return self.trading.submit_order(order_data=order_data)
         except Exception as exc:  # noqa: BLE001

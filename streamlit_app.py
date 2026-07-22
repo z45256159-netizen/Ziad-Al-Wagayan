@@ -17,13 +17,13 @@ import random
 
 import streamlit as st
 from ai import ai_choose, verify_key
-from analysis import explain_setup, invest_analysis
+from analysis import explain_setup, invest_analysis, news_sentiment
 from broker import Broker, BrokerError
 from chart import make_position_chart, tradingview_url
 from config import Config, ConfigError
 from sizing import TradePlan, build_trade_plan
 from strategy import detect_pattern, direction_of, rank_relaxed
-from universe import UNIVERSE
+from universe import UNIVERSE, describe
 
 st.set_page_config(page_title="Alpaca Trading Bot", page_icon="📈", layout="centered")
 
@@ -306,7 +306,27 @@ def build_trade():
     # =====================================================================
     if investing:
         a = invest_analysis(bars[sym], candidate.atr)
-        entry = round(candidate.last_price, 2)
+        price = round(candidate.last_price, 2)
+
+        # News + rough sentiment (is the news good?).
+        news = broker.get_news(sym)
+        sent_label, sent_emoji, _ = news_sentiment(news)
+
+        # Blend news into the verdict: bad news pulls it down a notch.
+        verdict = a.verdict
+        if sent_label == "BAD" and verdict == "GOOD":
+            verdict = "OKAY"
+        elif sent_label == "BAD" and verdict == "OKAY":
+            verdict = "AVOID"
+
+        # Entry: buy now (market) or a limit on a dip.
+        if ss.invest_entry == "Limit on a dip":
+            entry = round(price * (1 - ss.invest_dip_pct / 100), 2)
+            limit_price = entry
+        else:
+            entry = price
+            limit_price = None
+
         budget = min(0.10 * buying_power, ss.max_order * 3, buying_power)
         qty = int(budget // entry) or (1 if entry <= buying_power else 0)
         if qty < 1:
@@ -320,35 +340,45 @@ def build_trade():
         rr = round(reward_total / risk_total, 2) if risk_total else 0.0
         plan = TradePlan(sym, qty, entry, stop, target, round(qty * entry, 2),
                          risk_total, reward_total, rr, a.downside_pct, exp_pct,
-                         side="buy", direction="long")
+                         side="buy", direction="long", limit_price=limit_price)
 
-        emoji = {"GOOD": "🟢", "OKAY": "🟡", "AVOID": "🔴"}.get(a.verdict, "🟡")
-        parts = [f"### 📈 {sym} — long-term pick @ ${entry:,.2f}"]
-        parts.append(f"**Verdict: {emoji} {a.verdict}** · {a.perf_pct:+.0f}% "
-                     "over ~3 months")
-        parts.append(f"**Why:** {a.reason}")
+        emoji = {"GOOD": "🟢", "OKAY": "🟡", "AVOID": "🔴"}.get(verdict, "🟡")
+        parts = [f"### 📈 {sym} — long-term pick @ ${price:,.2f}"]
+        parts.append(f"**What it is:** {describe(sym)}")
+        parts.append(f"**Verdict: {emoji} {verdict}** · {a.perf_pct:+.0f}% over "
+                     f"~3 months · news {sent_emoji} {sent_label}")
+        parts.append(f"**Why buy:** {a.reason} "
+                     + ("Recent news looks supportive too." if sent_label == "GOOD"
+                        else "Watch the news — it looks negative." if sent_label == "BAD"
+                        else ""))
+
+        if limit_price:
+            entry_line = (f"- 🟢 **Buy {qty} share(s)** with a **LIMIT at "
+                          f"${entry:,.2f}** (−{ss.invest_dip_pct:.0f}% — fills only "
+                          f"if it dips there)")
+        else:
+            entry_line = (f"- 🟢 **Buy {qty} share(s) now** (~${plan.cost:,.2f}) — "
+                          f"{plan.cost / buying_power * 100:.0f}% of buying power")
         parts.append(
             "**📊 Plan (buy & hold)**\n"
-            f"- 🟢 **Buy {qty} share(s)** of {sym} (~${plan.cost:,.2f}) — "
-            f"{plan.cost / buying_power * 100:.0f}% of buying power\n"
+            f"{entry_line}\n"
             f"- ⏳ Suggested hold: **{a.horizon}**\n"
             f"- 📈 If it keeps its pace: **~+{exp_pct:.0f}%** (≈ +${reward_total:,.0f}) "
             f"→ target ${target:,.2f}\n"
             f"- 📉 Downside if wrong: **~-{a.downside_pct:.0f}%** (≈ -${risk_total:,.0f}) "
             f"→ protective stop ${stop:,.2f}\n"
             f"- ⚖️ Reward:risk ≈ **1 : {rr:g}**")
-        news = broker.get_news(sym)
         if news:
             parts.append("**📰 Recent news:**\n" +
                          "\n".join(f"- {h}" + (f" ({s})" if s else "")
                                    for h, s in news))
         else:
             parts.append("_No recent news found for this ticker._")
-        parts.append("_These are rough estimates for learning, not guarantees._")
+        parts.append("_Estimates for learning, not guarantees._")
         if market_open is False:
             parts.append("_Market is closed — the order will queue until it opens._")
-        parts.append("Place it? Tap **✅ Yes** or **❌ No** (buy + protective stop "
-                     "+ target, placed as one bracket).")
+        parts.append("Place it? Tap **✅ Yes** or **❌ No** (entry + protective "
+                     "stop + target, placed as one bracket).")
         ss.view = {"plan": plan, "bars": chart_bars,
                    "support": candidate.support, "resistance": candidate.resistance,
                    "marks": []}
@@ -433,13 +463,16 @@ def place_pending() -> None:
             take_profit=plan.take_profit,
             stop_loss=plan.stop,
             side=plan.side,
+            limit_price=plan.limit_price,
         )
         status = getattr(order.status, "value", order.status)
         entry_word = "SHORT-SELL" if plan.side == "sell" else "BUY"
         exit_word = "BUY-to-cover" if plan.side == "sell" else "SELL"
+        entry_desc = (f"LIMIT @ ${plan.limit_price:,.2f} (fills when price reaches it)"
+                      if plan.limit_price else "@ market")
         say("assistant",
             f"✅ **3 orders placed** for **{order.symbol}** (bracket):\n"
-            f"1. **{entry_word} {order.qty}** @ market — status *{status}*\n"
+            f"1. **{entry_word} {order.qty}** {entry_desc} — status *{status}*\n"
             f"2. 🛑 **{exit_word} stop-loss** @ ${plan.stop:,.2f}\n"
             f"3. 🎯 **{exit_word} take-profit** @ ${plan.take_profit:,.2f}\n\n"
             f"The stop and target trigger automatically — whichever hits first "
@@ -520,6 +553,8 @@ ss.setdefault("reward_risk", 2.0)
 ss.setdefault("auto_mode", False)
 ss.setdefault("scan_mode", "Technical patterns")
 ss.setdefault("direction_mode", "Both")
+ss.setdefault("invest_entry", "Buy now (market)")
+ss.setdefault("invest_dip_pct", 5.0)
 
 # --- A little CSS polish (theme-aware) ---
 st.markdown("""
@@ -575,6 +610,16 @@ with st.expander("⚙️ Trading settings"):
         ["Both", "Long only", "Short only"],
         index=["Both", "Long only", "Short only"].index(ss.direction_mode),
         help="Long = buy (profit if it rises). Short = sell (profit if it falls).")
+    if ss.scan_mode == "Best performers":
+        ss.invest_entry = st.radio(
+            "Investing — how to enter",
+            ["Buy now (market)", "Limit on a dip"],
+            index=["Buy now (market)", "Limit on a dip"].index(ss.invest_entry),
+            help="Buy now = fills immediately. Limit on a dip = waits to buy "
+                 "lower (e.g. -5%); fills only if the price comes down to it.")
+        if ss.invest_entry == "Limit on a dip":
+            ss.invest_dip_pct = st.slider("Buy this % below current price",
+                                          1.0, 10.0, float(ss.invest_dip_pct), 0.5)
     st.markdown("---")
     ss.risk_pct = st.slider(
         "Risk per trade (% of buying power)", 0.25, 5.0,
