@@ -16,10 +16,10 @@ import os
 import random
 
 import streamlit as st
-from ai import ai_choose, verify_key
+from ai import ai_choose, verify_key, vision_pattern
 from analysis import explain_setup, invest_analysis, news_sentiment
 from broker import Broker, BrokerError
-from chart import make_position_chart, tradingview_url
+from chart import chart_png, make_position_chart, tradingview_url
 from config import Config, ConfigError
 from sizing import TradePlan, build_trade_plan
 from strategy import detect_pattern, direction_of, rank_relaxed
@@ -392,24 +392,49 @@ def build_trade():
         if not allowed(direction):
             direction = forced or "long"
 
+    # 🔍 CHART-VISION: if a Groq key is set, render the chart and have the AI
+    # actually LOOK at it to name/confirm the pattern (overrides the rule-based
+    # read). Falls back silently if rendering or the call fails.
+    vision = None
+    if ss.groq_key:
+        with st.spinner("🔍 AI is looking at the chart…"):
+            img = chart_png(chart_bars)
+            if img:
+                vision = vision_pattern(img, ss.groq_key,
+                                        _secret("AI_VISION_MODEL", "").strip() or None)
+    used_vision = bool(vision and vision.pattern
+                       and vision.pattern.lower() not in ("none", "no clear pattern", ""))
+    if used_vision and vision.direction in ("long", "short") and allowed(vision.direction):
+        direction = vision.direction
+
     plan = build_trade_plan(
         score=candidate, buying_power=buying_power, risk_pct=ss.risk_pct,
         max_order_dollars=ss.max_order, stop_atr_mult=ss.stop_mult,
         reward_risk=ss.reward_risk, direction=direction)
 
-    pattern = (ai.pattern if (ai is not None and ai.pattern) else candidate.pattern)
     parts = [f"### 📊 {sym} @ ${plan.entry:,.2f}"]
-    parts.append(f"📐 **Setup found: {pattern}**")
-    info = explain_setup(candidate.pattern, candidate.support,
-                         candidate.resistance, plan.entry,
-                         pattern_marks.get(sym, []))
-    if info:
-        what, why, how = info
-        parts.append(f"**How I found it:** {sym} shows {what}.\n\n"
-                     f"**Why it's a signal:** {why}.\n\n"
-                     f"**How to trade it:** {how}.")
-    parts.append(f"**The numbers:** {candidate.reason}")
-    if ai is not None:
+    if used_vision:
+        vbadge = {"GO": "🟢", "CAUTION": "🟡", "NO-GO": "🔴"}.get(
+            vision.recommendation, "🔍")
+        parts.append(f"🔍 **The AI looked at the chart** and sees: "
+                     f"**{vision.pattern}** ({vision.confidence} confidence · "
+                     f"{vbadge} {vision.recommendation}).")
+        if vision.rationale:
+            parts.append(f"_{vision.rationale}_")
+        parts.append(f"**The numbers:** {candidate.reason}")
+    else:
+        pattern = candidate.pattern
+        parts.append(f"📐 **Setup found: {pattern}**")
+        info = explain_setup(candidate.pattern, candidate.support,
+                             candidate.resistance, plan.entry,
+                             pattern_marks.get(sym, []))
+        if info:
+            what, why, how = info
+            parts.append(f"**How I found it:** {sym} shows {what}.\n\n"
+                         f"**Why it's a signal:** {why}.\n\n"
+                         f"**How to trade it:** {how}.")
+        parts.append(f"**The numbers:** {candidate.reason}")
+    if ai is not None and not used_vision:
         badge = {"GO": "🟢", "CAUTION": "🟡", "NO-GO": "🔴"}.get(ai.recommendation, "🤖")
         parts.append(f"🤖 **AI ({ai.confidence} confidence): {badge} "
                      f"{ai.recommendation}** — {ai.rationale}")
@@ -665,8 +690,9 @@ _mode_icon = "📈 Investing (best performers)" if ss.scan_mode == "Best perform
     else "📐 Technical (patterns)"
 _dir_icon = {"Both": "↔ Long & Short", "Long only": "🟢 Long only",
              "Short only": "🔻 Short only"}.get(ss.direction_mode, ss.direction_mode)
+_vision = "  ·  🔍 AI chart-vision ON" if ss.groq_key else ""
 st.caption(f"🔎 Mode: **{_mode_icon}**  ·  {_dir_icon}  "
-           f"·  {'🤖 Auto' if ss.auto_mode else '✋ Manual'}")
+           f"·  {'🤖 Auto' if ss.auto_mode else '✋ Manual'}{_vision}")
 
 st.divider()
 

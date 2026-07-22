@@ -10,6 +10,50 @@ from typing import List
 from strategy import Bar
 
 
+def chart_png(bars: List[Bar]):
+    """
+    Render the candlesticks to a PNG (bytes) for a vision AI to look at.
+    Returns None if matplotlib isn't available or rendering fails.
+    """
+    try:
+        import io
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from matplotlib.patches import Rectangle
+    except Exception:
+        return None
+    fig = None
+    try:
+        fig, ax = plt.subplots(figsize=(6, 4), dpi=100)
+        for i, b in enumerate(bars):
+            o = b.open if b.open is not None else b.close
+            c = b.close
+            h = b.high if b.high is not None else max(o, c)
+            lo = b.low if b.low is not None else min(o, c)
+            color = "#26a69a" if c >= o else "#ef5350"
+            ax.plot([i, i], [lo, h], color=color, linewidth=1)
+            body = abs(c - o) or max((h - lo) * 0.02, 0.01)
+            ax.add_patch(Rectangle((i - 0.3, min(o, c)), 0.6, body, color=color))
+        ax.set_xlim(-1, len(bars))
+        ax.margins(y=0.1)
+        ax.set_title("Daily candlesticks")
+        ax.grid(alpha=0.2)
+        ax.set_xticks([])
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", bbox_inches="tight")
+        plt.close(fig)
+        return buf.getvalue()
+    except Exception:
+        try:
+            if fig is not None:
+                import matplotlib.pyplot as plt
+                plt.close(fig)
+        except Exception:
+            pass
+        return None
+
+
 def tradingview_url(symbol: str) -> str:
     """Deep link to the live TradingView chart for a US ticker."""
     return f"https://www.tradingview.com/chart/?symbol={symbol.upper()}"

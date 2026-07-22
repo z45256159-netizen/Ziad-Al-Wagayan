@@ -15,6 +15,7 @@ break scanning.
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 import urllib.error
@@ -27,6 +28,9 @@ from strategy import SymbolScore
 # Groq endpoint + a solid free model. Override the model with the AI_MODEL secret.
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODEL = "llama-3.3-70b-versatile"
+# Vision-capable free Groq model (override with the AI_VISION_MODEL secret if the
+# default is ever retired). This is the model that actually LOOKS at the chart.
+VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 
 
 @dataclass
@@ -69,6 +73,71 @@ def verify_key(api_key: str, model: str = GROQ_MODEL) -> bool:
         return bool(body["choices"][0]["message"]["content"])
     except (TypeError, KeyError, IndexError):
         return False
+
+
+@dataclass
+class VisionResult:
+    pattern: str
+    direction: str       # long / short / none
+    recommendation: str  # GO / CAUTION / NO-GO
+    confidence: str      # low / medium / high
+    rationale: str
+
+
+_VISION_PROMPT = (
+    "You are a technical analyst. This is a daily candlestick chart of a stock. "
+    "Look at it and identify the single clearest chart pattern actually visible — "
+    "one of: head and shoulders, inverse head and shoulders, double top, double "
+    "bottom, triple top, triple bottom, ascending triangle, descending triangle, "
+    "symmetrical triangle, bull flag, bear flag, breakout, breakdown, uptrend, "
+    "downtrend, or none. Be honest: if there is no clear pattern, say \"none\" — "
+    "do NOT invent one. Then give a short trader's read.\n\n"
+    "Respond with ONLY a JSON object (no prose, no code fences):\n"
+    '{"pattern": "...", "direction": "long|short|none", '
+    '"recommendation": "GO|CAUTION|NO-GO", "confidence": "low|medium|high", '
+    '"rationale": "one or two sentences on what you see and why"}'
+)
+
+
+def vision_pattern(image_png: bytes, api_key: str,
+                   model: Optional[str] = None) -> Optional[VisionResult]:
+    """
+    Send the chart IMAGE to a Groq vision model and get back the pattern it sees.
+    Returns None on any failure (caller falls back to rule-based detection).
+    """
+    if not image_png or not api_key:
+        return None
+    b64 = base64.b64encode(image_png).decode("ascii")
+    payload = {
+        "model": model or VISION_MODEL,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": _VISION_PROMPT},
+                {"type": "image_url",
+                 "image_url": {"url": f"data:image/png;base64,{b64}"}},
+            ],
+        }],
+        "temperature": 0.2,
+        "max_tokens": 500,
+    }
+    body = _post(api_key, payload, timeout=45)
+    if body is None:
+        return None
+    try:
+        content = body["choices"][0]["message"]["content"]
+    except (TypeError, KeyError, IndexError):
+        return None
+    data = _extract_json(content)
+    if not data:
+        return None
+    return VisionResult(
+        pattern=str(data.get("pattern", "")).strip(),
+        direction=str(data.get("direction", "none")).strip().lower(),
+        recommendation=str(data.get("recommendation", "CAUTION")).strip().upper(),
+        confidence=str(data.get("confidence", "medium")).strip().lower(),
+        rationale=str(data.get("rationale", "")).strip(),
+    )
 
 
 def _build_messages(candidates: List[SymbolScore]) -> list:
