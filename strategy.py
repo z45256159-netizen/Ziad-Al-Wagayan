@@ -324,14 +324,16 @@ def detect_pattern(bars: List[Bar]):
     last = closes[-1]
     sma = sum(closes[-20:]) / min(20, n)
 
-    # Breakout above the recent ceiling.
-    prior_high = max(highs[:-2])
+    # Breakout above the ceiling (bullish) / breakdown below the floor (bearish).
+    prior_high, prior_low = max(highs[:-2]), min(lows[:-2])
     if last >= prior_high:
         return ("Breakout to new highs", [(n - 1, last, "breakout")])
+    if last <= prior_low:
+        return ("Breakdown to new lows", [(n - 1, last, "breakdown")])
 
     mins, maxs = _local_min_idx(lows), _local_max_idx(highs)
 
-    # Double / triple bottom: 2-3 similar swing lows, price now recovering.
+    # Double / triple bottom (bullish): similar swing lows, price recovering.
     if len(mins) >= 2:
         recent = mins[-3:]
         lvls = [lows[i] for i in recent]
@@ -339,6 +341,15 @@ def detect_pattern(bars: List[Bar]):
         if base > 0 and (max(lvls) - min(lvls)) / base < 0.04 and last > base * 1.02:
             name = "Triple bottom" if len(recent) >= 3 else "Double bottom"
             return (name, [(i, lows[i], "bottom") for i in recent])
+
+    # Double / triple top (bearish): similar swing highs, price rolling over.
+    if len(maxs) >= 2:
+        recent = maxs[-3:]
+        lvls = [highs[i] for i in recent]
+        top = max(lvls)
+        if top > 0 and (max(lvls) - min(lvls)) / top < 0.04 and last < top * 0.98:
+            name = "Triple top" if len(recent) >= 3 else "Double top"
+            return (name, [(i, highs[i], "top") for i in recent])
 
     # Head & shoulders (bearish): three peaks, middle highest, shoulders even.
     if len(maxs) >= 3:
@@ -349,14 +360,32 @@ def detect_pattern(bars: List[Bar]):
                     [(p[0], h[0], "L shoulder"), (p[1], h[1], "head"),
                      (p[2], h[2], "R shoulder")])
 
-    # Bull flag / pullback within an uptrend.
+    # Flags: a pause within the prevailing trend.
     if (last > sma and closes[-1] > closes[-4]
             and (max(closes[-12:]) - last) / max(closes[-12:]) < 0.06):
         return ("Bull flag / pullback", [])
+    if (last < sma and closes[-1] < closes[-4]
+            and (last - min(closes[-12:])) / min(closes[-12:]) < 0.06):
+        return ("Bear flag / bounce", [])
 
     if last > sma:
         return ("Uptrend (higher lows)", [])
+    if last < sma:
+        return ("Downtrend (lower highs)", [])
     return ("Range / no clear pattern", [])
+
+
+def direction_of(label: str) -> str:
+    """Map a pattern label to a trade direction: 'long', 'short', or 'none'."""
+    low = label.lower()
+    longs = ("breakout", "double bottom", "triple bottom", "bull flag", "uptrend")
+    shorts = ("breakdown", "double top", "triple top", "head & shoulders",
+              "bear flag", "downtrend")
+    if any(k in low for k in longs):
+        return "long"
+    if any(k in low for k in shorts):
+        return "short"
+    return "none"
 
 
 def rank_relaxed(bars_by_symbol: dict[str, List[Bar]]) -> List[SymbolScore]:

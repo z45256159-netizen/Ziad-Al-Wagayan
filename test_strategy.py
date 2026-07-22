@@ -8,8 +8,8 @@ These run WITHOUT any API keys or network access:
 import unittest
 
 from sizing import build_trade_plan, size_position
-from strategy import (Bar, detect_pattern, find_candidate, rank_candidates,
-                      rank_relaxed, score_symbol)
+from strategy import (Bar, detect_pattern, direction_of, find_candidate,
+                      rank_candidates, rank_relaxed, score_symbol)
 
 
 class TestPatterns(unittest.TestCase):
@@ -162,6 +162,22 @@ class TestTradePlan(unittest.TestCase):
         plan = build_trade_plan(s, buying_power=100_000, risk_pct=0.01,
                                 max_order_dollars=2000)
         self.assertGreater(plan.qty, 1)  # not stuck on 1 share
+
+    def test_short_plan_flips_stop_and_target(self):
+        s = self._score()
+        plan = build_trade_plan(s, buying_power=100_000, risk_pct=0.01,
+                                max_order_dollars=2000, direction="short")
+        self.assertEqual(plan.side, "sell")
+        self.assertGreater(plan.stop, plan.entry)          # stop ABOVE for a short
+        self.assertLess(plan.take_profit, plan.entry)      # target BELOW for a short
+        self.assertAlmostEqual(plan.rr_ratio, 2.0, places=1)
+
+    def test_direction_mapping(self):
+        self.assertEqual(direction_of("Double bottom"), "long")
+        self.assertEqual(direction_of("Breakout to new highs"), "long")
+        self.assertEqual(direction_of("Head & shoulders (bearish)"), "short")
+        self.assertEqual(direction_of("Double top"), "short")
+        self.assertEqual(direction_of("Range / no clear pattern"), "none")
 
 
 if __name__ == "__main__":

@@ -21,7 +21,7 @@ from broker import Broker, BrokerError
 from chart import make_position_chart, tradingview_url
 from config import Config, ConfigError
 from sizing import build_trade_plan
-from strategy import detect_pattern, rank_relaxed
+from strategy import detect_pattern, direction_of, rank_relaxed
 from universe import UNIVERSE
 
 st.set_page_config(page_title="Alpaca Trading Bot", page_icon="📈", layout="centered")
@@ -253,9 +253,9 @@ def build_trade():
         c.pattern = label
         pattern_marks[c.symbol] = marks
 
-    # Prefer BULLISH setups (we only buy). Fall back to the full list if none.
-    bullish = ("breakout", "double bottom", "triple bottom", "bull flag")
-    setups = [c for c in pool_top if any(k in c.pattern.lower() for k in bullish)]
+    # Prefer stocks with a RECOGNIZED setup — bullish (we go long) OR bearish
+    # (we short). Only "range / no clear pattern" is skipped.
+    setups = [c for c in pool_top if direction_of(c.pattern) != "none"]
     choose_from = setups if setups else pool_top
 
     # Weighted-random pick so 'find' gives DIFFERENT answers each time; the AI,
@@ -277,6 +277,10 @@ def build_trade():
     except BrokerError as exc:
         return f"⚠️ Couldn't read your buying power: {exc}", None
 
+    direction = direction_of(candidate.pattern)
+    if direction == "none":
+        direction = "long"  # default to long when the pattern is unclear
+
     plan = build_trade_plan(
         score=candidate,
         buying_power=buying_power,
@@ -284,6 +288,7 @@ def build_trade():
         max_order_dollars=ss.max_order,
         stop_atr_mult=ss.stop_mult,
         reward_risk=ss.reward_risk,
+        direction=direction,
     )
 
     # Remember this ticker so the next scan tends to pick something different.
@@ -308,14 +313,23 @@ def build_trade():
         parts.append(f"⚠️ Can't build an order: {plan.skipped_reason}")
         return "\n\n".join(parts), None
 
+    if plan.direction == "short":
+        action = f"🔻 **SHORT-SELL {plan.qty} share(s)**"
+        dir_note = "_Short = you profit if the price **falls**._"
+        stop_side, tp_side = "above", "below"
+    else:
+        action = f"🟢 **BUY {plan.qty} share(s)**"
+        dir_note = "_Long = you profit if the price **rises**._"
+        stop_side, tp_side = "below", "above"
+
     parts.append(
         "**📋 Trade plan**\n"
-        f"- **Buy {plan.qty} share(s)** of {plan.symbol} at ~${plan.entry:,.2f}\n"
+        f"- {action} of {plan.symbol} at ~${plan.entry:,.2f}  {dir_note}\n"
         f"- 💵 Cost: **${plan.cost:,.2f}**\n"
-        f"- 🛑 Stop-loss: **${plan.stop:,.2f}** (−{plan.stop_pct:.1f}%) → "
-        f"risk **${plan.risk_total:,.2f}** if it hits\n"
-        f"- 🎯 Take-profit: **${plan.take_profit:,.2f}** (+{plan.tp_pct:.1f}%) → "
-        f"profit **${plan.reward_total:,.2f}** if it hits\n"
+        f"- 🛑 Stop-loss: **${plan.stop:,.2f}** ({stop_side}, {plan.stop_pct:.1f}%) "
+        f"→ risk **${plan.risk_total:,.2f}** if it hits\n"
+        f"- 🎯 Take-profit: **${plan.take_profit:,.2f}** ({tp_side}, "
+        f"{plan.tp_pct:.1f}%) → profit **${plan.reward_total:,.2f}** if it hits\n"
         f"- ⚖️ Risk/reward: **1 : {plan.rr_ratio:g}**"
     )
     parts.append(
@@ -346,16 +360,19 @@ def place_pending() -> None:
             qty=plan.qty,
             take_profit=plan.take_profit,
             stop_loss=plan.stop,
+            side=plan.side,
         )
         status = getattr(order.status, "value", order.status)
+        entry_word = "SHORT-SELL" if plan.side == "sell" else "BUY"
+        exit_word = "BUY-to-cover" if plan.side == "sell" else "SELL"
         say("assistant",
             f"✅ **3 orders placed** for **{order.symbol}** (bracket):\n"
-            f"1. **BUY {order.qty}** @ market — status *{status}*\n"
-            f"2. 🛑 **SELL stop-loss** @ ${plan.stop:,.2f}\n"
-            f"3. 🎯 **SELL take-profit** @ ${plan.take_profit:,.2f}\n\n"
+            f"1. **{entry_word} {order.qty}** @ market — status *{status}*\n"
+            f"2. 🛑 **{exit_word} stop-loss** @ ${plan.stop:,.2f}\n"
+            f"3. 🎯 **{exit_word} take-profit** @ ${plan.take_profit:,.2f}\n\n"
             f"The stop and target trigger automatically — whichever hits first "
             f"cancels the other. (Order id `{order.id}`.)\n\n"
-            f"_If the market is closed the buy queues until 9:30am ET, and the "
+            f"_If the market is closed the entry queues until 9:30am ET, and the "
             f"stop/target activate once it fills._")
     except BrokerError as exc:
         say("assistant", f"❌ Order failed: {exc}\n\n_(If it mentions the market "

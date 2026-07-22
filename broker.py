@@ -153,17 +153,20 @@ class Broker:
             raise BrokerError(f"Order rejected by Alpaca: {exc}") from exc
 
     def submit_bracket_order(
-        self, symbol: str, qty: int, take_profit: float, stop_loss: float
+        self, symbol: str, qty: int, take_profit: float, stop_loss: float,
+        side: str = "buy",
     ) -> object:
         """
-        Submit a BRACKET order: a market BUY entry that automatically attaches a
-        take-profit limit and a stop-loss. Once the entry fills, Alpaca manages
-        both exits for you (whichever hits first cancels the other).
+        Submit a BRACKET order: a market entry (BUY to go long, SELL to short)
+        that automatically attaches a take-profit limit and a stop-loss. Once the
+        entry fills, Alpaca manages both exits (whichever hits first cancels the
+        other).
         """
+        order_side = OrderSide.SELL if side == "sell" else OrderSide.BUY
         order_data = MarketOrderRequest(
             symbol=symbol,
             qty=qty,
-            side=OrderSide.BUY,
+            side=order_side,
             time_in_force=TimeInForce.DAY,
             order_class=OrderClass.BRACKET,
             take_profit=TakeProfitRequest(limit_price=round(take_profit, 2)),

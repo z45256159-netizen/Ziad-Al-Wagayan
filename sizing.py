@@ -38,6 +38,8 @@ class TradePlan:
     stop_pct: float         # stop distance as a % of entry
     tp_pct: float           # take-profit distance as a % of entry
     skipped_reason: Optional[str] = None
+    side: str = "buy"       # "buy" (long) or "sell" (short)
+    direction: str = "long"  # "long" or "short"
 
     @property
     def ok(self) -> bool:
@@ -55,6 +57,7 @@ def build_trade_plan(
     max_order_dollars: float,
     stop_atr_mult: float = STOP_ATR_MULT,
     reward_risk: float = REWARD_RISK,
+    direction: str = "long",
 ) -> TradePlan:
     """
     Turn a scored candidate into a full trade plan.
@@ -73,10 +76,20 @@ def build_trade_plan(
     # Volatility-based stop distance (with a minimum so it's never razor-thin).
     atr = score.atr if score.atr > 0 else entry * 0.01
     risk_per_share = max(stop_atr_mult * atr, entry * MIN_STOP_PCT)
-    stop = round(entry - risk_per_share, 2)
-    take_profit = round(entry + reward_risk * risk_per_share, 2)
-    if stop <= 0:
-        return _skip(score.symbol, "Stop-loss would be below zero.")
+
+    short = (direction == "short")
+    if short:
+        # SHORT: profit if price FALLS. Stop is ABOVE, target is BELOW entry.
+        stop = round(entry + risk_per_share, 2)
+        take_profit = round(entry - reward_risk * risk_per_share, 2)
+        side = "sell"
+    else:
+        # LONG: profit if price RISES. Stop BELOW, target ABOVE entry.
+        stop = round(entry - risk_per_share, 2)
+        take_profit = round(entry + reward_risk * risk_per_share, 2)
+        side = "buy"
+    if take_profit <= 0 or stop <= 0:
+        return _skip(score.symbol, "Price too low to place a sensible stop/target.")
 
     # Risk-based share count, then cap by order size and buying power.
     risk_budget = risk_pct * buying_power
@@ -97,7 +110,7 @@ def build_trade_plan(
 
     cost = round(qty * entry, 2)
     risk_total = round(qty * risk_per_share, 2)
-    reward_total = round(qty * (take_profit - entry), 2)
+    reward_total = round(qty * abs(take_profit - entry), 2)
     rr_ratio = round(reward_total / risk_total, 2) if risk_total else 0.0
 
     return TradePlan(
@@ -110,8 +123,10 @@ def build_trade_plan(
         risk_total=risk_total,
         reward_total=reward_total,
         rr_ratio=rr_ratio,
-        stop_pct=round((entry - stop) / entry * 100, 2),
-        tp_pct=round((take_profit - entry) / entry * 100, 2),
+        stop_pct=round(abs(stop - entry) / entry * 100, 2),
+        tp_pct=round(abs(take_profit - entry) / entry * 100, 2),
+        side=side,
+        direction=direction,
     )
 
 
