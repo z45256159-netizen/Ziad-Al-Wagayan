@@ -35,6 +35,7 @@ class AIResult:
     recommendation: str  # GO / CAUTION / NO-GO
     confidence: str      # low / medium / high
     rationale: str
+    pattern: str = ""    # chart pattern the AI identified
 
 
 def _post(api_key: str, payload: dict, timeout: int = 30) -> Optional[dict]:
@@ -71,32 +72,35 @@ def verify_key(api_key: str, model: str = GROQ_MODEL) -> bool:
 
 
 def _build_messages(candidates: List[SymbolScore]) -> list:
-    lines = ["Candidates (all already passed a trend + RSI + MACD + volume filter):"]
+    lines = ["Candidates (a list of movers — each with its indicators and a "
+             "detected chart pattern):"]
     for c in candidates:
         lines.append(
-            f"- {c.symbol}: price ${c.last_price:.2f}, "
-            f"{c.momentum_strength * 100:.1f}% above its 20-day average, "
-            f"RSI {c.rsi:.0f}, MACD histogram {c.macd_hist:+.2f}, "
-            f"volume {c.volume_ratio:.2f}x average, composite score {c.score:.4f}"
+            f"- {c.symbol}: price ${c.last_price:.2f}, pattern: "
+            f"{c.pattern or 'n/a'}, {c.momentum_strength * 100:.1f}% vs 20-day "
+            f"avg, RSI {c.rsi:.0f}, MACD {c.macd_hist:+.2f}, "
+            f"vol {c.volume_ratio:.2f}x, support ${c.support:.2f}, "
+            f"resistance ${c.resistance:.2f}"
         )
     data = "\n".join(lines)
     system = (
-        "You are a disciplined short-term trading assistant. You will be given "
-        "stock candidates that already PASSED a multi-indicator filter (uptrend "
-        "via moving-average crossover, RSI momentum, bullish MACD, and "
-        "above-average volume). Using ONLY the numbers provided, pick the single "
-        "best candidate for a short-term momentum swing trade. Favor strong, "
-        "volume-backed momentum with RSI that shows strength without being "
-        "overbought (very high RSI is a caution). This is educational, not "
-        "financial advice.\n\n"
+        "You are a sharp short-term / day-trading assistant. You are given a list "
+        "of moving stocks, each with indicators, support/resistance, and a "
+        "roughly-detected chart pattern. Go through them and pick the ONE with "
+        "the cleanest tradeable setup right now — a clear pattern (breakout, "
+        "double/triple bottom, bull flag, etc.) backed by momentum and volume, "
+        "with room to a sensible target before resistance. Confirm or correct the "
+        "detected pattern using the numbers. This is educational, not financial "
+        "advice.\n\n"
         "Respond with ONLY a JSON object (no prose, no code fences) with exactly "
         "these keys:\n"
         '  "symbol": one of the candidate tickers,\n'
+        '  "pattern": the chart pattern / setup you see (e.g. "Double bottom", '
+        '"Bull flag", "Breakout"),\n'
         '  "recommendation": one of "GO", "CAUTION", "NO-GO",\n'
         '  "confidence": one of "low", "medium", "high",\n'
-        '  "rationale": 2-3 sentences a beginner can follow — say WHY this stock '
-        "won over the others, referencing its trend, RSI, MACD and volume, and "
-        "what would make you cautious."
+        '  "rationale": 2-3 sentences a beginner can follow — why this setup, and '
+        "what would invalidate it."
     )
     return [
         {"role": "system", "content": system},
@@ -152,4 +156,5 @@ def ai_choose(
         recommendation=str(data.get("recommendation", "CAUTION")).upper(),
         confidence=str(data.get("confidence", "medium")).lower(),
         rationale=str(data.get("rationale", "")).strip(),
+        pattern=str(data.get("pattern", "")).strip(),
     )

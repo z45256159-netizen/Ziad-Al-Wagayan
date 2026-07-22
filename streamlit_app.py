@@ -21,7 +21,7 @@ from broker import Broker, BrokerError
 from chart import make_position_chart, tradingview_url
 from config import Config, ConfigError
 from sizing import build_trade_plan
-from strategy import rank_candidates, rank_relaxed
+from strategy import detect_pattern, rank_relaxed
 from universe import UNIVERSE
 
 st.set_page_config(page_title="Alpaca Trading Bot", page_icon="📈", layout="centered")
@@ -226,14 +226,10 @@ def build_trade():
     if not bars:
         return "No market data came back. Try again in a moment.", None
 
-    ranked = rank_candidates(bars)
-    relaxed_mode = False
-    if not ranked:
-        # Fallback for practice: show the strongest available even if it doesn't
-        # meet the full setup, clearly labeled.
-        ranked = rank_relaxed(bars)
-        relaxed_mode = True
-    if not ranked:
+    # ONE broad filter: rank all stocks as "movers" (by momentum + volume);
+    # nothing is rejected up front. The AI then looks for the best setup.
+    movers = rank_relaxed(bars)
+    if not movers:
         return ("Couldn't score any stock (not enough price history). "
                 "Try again in a moment."), None
 
@@ -241,19 +237,24 @@ def build_trade():
         held = broker.held_symbols()
     except BrokerError as exc:
         return f"⚠️ Couldn't check your positions: {exc}", None
-    tradeable = [c for c in ranked if c.symbol not in held]
+    tradeable = [c for c in movers if c.symbol not in held]
     if not tradeable:
-        return ("The best candidates are all already in your portfolio — "
-                "skipping to avoid doubling up."), None
+        return ("Every mover is already in your portfolio — skipping to avoid "
+                "doubling up."), None
 
-    # Variety: prefer candidates we haven't just suggested. If that empties the
-    # list, fall back to the full set.
+    # Variety: prefer candidates we haven't just suggested.
     fresh = [c for c in tradeable if c.symbol not in ss.recent]
-    pool = fresh if fresh else tradeable
-    pool_top = pool[:8]
+    pool_top = (fresh if fresh else tradeable)[:8]
 
-    # Weighted-random pick among the top so you get DIFFERENT answers each time
-    # (higher-scoring names are more likely, but it's not always the same one).
+    # Detect a chart pattern for each candidate (breakout, double bottom, flag…).
+    pattern_marks = {}
+    for c in pool_top:
+        label, marks = detect_pattern(bars[c.symbol][-40:])
+        c.pattern = label
+        pattern_marks[c.symbol] = marks
+
+    # Weighted-random pick so 'find' gives DIFFERENT answers each time; the AI,
+    # if configured, overrides with the cleanest pattern setup.
     weights = [max(c.score, 1e-4) for c in pool_top]
     candidate = random.choices(pool_top, weights=weights, k=1)[0]
 
@@ -283,17 +284,14 @@ def build_trade():
     # Remember this ticker so the next scan tends to pick something different.
     ss.recent = ([candidate.symbol] + ss.recent)[:3]
 
+    # The pattern to headline: the AI's read if present, else the detected one.
+    pattern = (ai.pattern if (ai is not None and ai.pattern)
+               else candidate.pattern)
+
     # ---- Build the full, trader-style message ----
     parts = [f"### 📊 {candidate.symbol} @ ${plan.entry:,.2f}"]
-    if relaxed_mode:
-        parts.append("⚠️ **No stock met all 4 filters right now** (often the case "
-                     "when the market is closed or flat). Here's the strongest "
-                     "candidate so you can still practice — treat it as a "
-                     "**demo**, not a green-light signal.")
+    parts.append(f"📐 **Setup found: {pattern}**")
     parts.append(f"**Why this stock:** {candidate.reason}")
-    parts.append("**Strategy:** moving-average crossover (20 vs 50) + RSI + MACD "
-                 "+ volume — a momentum setup that only fires when trend, "
-                 "momentum, confirmation and participation all agree.")
     if ai is not None:
         badge = {"GO": "🟢", "CAUTION": "🟡", "NO-GO": "🔴"}.get(ai.recommendation, "🤖")
         parts.append(f"🤖 **AI ({ai.confidence} confidence): {badge} "
@@ -329,7 +327,8 @@ def build_trade():
 
     # Stash the chart (last ~40 bars of the chosen ticker) for rendering.
     ss.view = {"plan": plan, "bars": bars[candidate.symbol][-40:],
-               "support": candidate.support, "resistance": candidate.resistance}
+               "support": candidate.support, "resistance": candidate.resistance,
+               "marks": pattern_marks.get(candidate.symbol, [])}
     return "\n\n".join(parts), {"plan": plan, "ai": ai}
 
 
@@ -519,7 +518,8 @@ view = ss.get("view")
 if view:
     fig = make_position_chart(view["bars"], view["plan"],
                               support=view.get("support"),
-                              resistance=view.get("resistance"))
+                              resistance=view.get("resistance"),
+                              marks=view.get("marks"))
     if fig is not None:
         st.plotly_chart(fig, use_container_width=True)
         st.link_button("📈 Open on TradingView",

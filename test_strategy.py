@@ -8,7 +8,24 @@ These run WITHOUT any API keys or network access:
 import unittest
 
 from sizing import build_trade_plan, size_position
-from strategy import Bar, find_candidate, rank_candidates, rank_relaxed, score_symbol
+from strategy import (Bar, detect_pattern, find_candidate, rank_candidates,
+                      rank_relaxed, score_symbol)
+
+
+class TestPatterns(unittest.TestCase):
+    def test_breakout_detected(self):
+        bars = [Bar(close=100 + i, volume=1000, high=100 + i + 1, low=100 + i - 1)
+                for i in range(40)]
+        self.assertEqual(detect_pattern(bars)[0], "Breakout to new highs")
+
+    def test_double_or_triple_bottom_detected(self):
+        # Two equal lows (~104), recovering but staying BELOW the prior high (~120)
+        # so it's a bottom, not a breakout.
+        seq = [120, 117, 113, 109, 106, 104, 107, 111, 112, 109, 106, 104, 108,
+               111, 114, 115]
+        bars = [Bar(close=c, volume=1000, high=c + 1, low=c - 1) for c in seq]
+        label = detect_pattern(bars)[0]
+        self.assertIn("bottom", label.lower())
 
 
 def _bars(closes, volumes):

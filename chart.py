@@ -15,7 +15,8 @@ def tradingview_url(symbol: str) -> str:
     return f"https://www.tradingview.com/chart/?symbol={symbol.upper()}"
 
 
-def make_position_chart(bars: List[Bar], plan, support=None, resistance=None):
+def make_position_chart(bars: List[Bar], plan, support=None, resistance=None,
+                        marks=None):
     """
     Build a Plotly candlestick figure with the trade drawn on it:
       * green zone from entry up to the take-profit,
@@ -73,6 +74,18 @@ def make_position_chart(bars: List[Bar], plan, support=None, resistance=None):
                            font=dict(color="#e5e7eb", size=11),
                            xanchor="right", yanchor="bottom",
                            bgcolor="rgba(17,24,39,0.75)")
+
+    # Pattern markers (e.g. the two lows of a double bottom, or H&S peaks).
+    if marks:
+        mx = [m[0] for m in marks]
+        my = [m[1] for m in marks]
+        fig.add_trace(go.Scatter(
+            x=mx, y=my, mode="markers+text",
+            marker=dict(size=11, color="#eab308", symbol="circle-open",
+                        line=dict(width=2)),
+            text=[m[2] for m in marks], textposition="bottom center",
+            textfont=dict(color="#eab308", size=10), name="pattern",
+        ))
 
     fig.update_layout(
         title=f"{plan.symbol} — {plan.qty} shares · Risk/Reward 1:{plan.rr_ratio:g}",

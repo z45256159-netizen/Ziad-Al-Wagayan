@@ -89,6 +89,7 @@ class SymbolScore:
     support: float = 0.0      # recent swing low (price floor)
     resistance: float = 0.0   # recent swing high (price ceiling)
     breakout: bool = False    # price broke above prior resistance (fresh high)
+    pattern: str = ""         # detected chart pattern label (set by the app)
 
 
 # ------------------------------------------------------------------ indicators
@@ -296,6 +297,66 @@ def score_relaxed(symbol: str, bars: List[Bar]) -> Optional[SymbolScore]:
         rsi=rsi, macd_hist=macd_hist, atr=atr, reason=reason,
         support=support, resistance=resistance,
     )
+
+
+def _local_min_idx(vals: Sequence[float], w: int = 3) -> List[int]:
+    return [i for i in range(w, len(vals) - w)
+            if vals[i] == min(vals[i - w:i + w + 1])]
+
+
+def _local_max_idx(vals: Sequence[float], w: int = 3) -> List[int]:
+    return [i for i in range(w, len(vals) - w)
+            if vals[i] == max(vals[i - w:i + w + 1])]
+
+
+def detect_pattern(bars: List[Bar]):
+    """
+    Best-effort chart-pattern label for the given window of bars, plus points to
+    mark on the chart. Heuristic — meant as a helpful read, not a guarantee.
+    Returns (label, marks) where marks is a list of (index, price, text).
+    """
+    n = len(bars)
+    if n < 15:
+        return ("not enough data", [])
+    closes = [b.close for b in bars]
+    highs = [(b.high if b.high is not None else b.close) for b in bars]
+    lows = [(b.low if b.low is not None else b.close) for b in bars]
+    last = closes[-1]
+    sma = sum(closes[-20:]) / min(20, n)
+
+    # Breakout above the recent ceiling.
+    prior_high = max(highs[:-2])
+    if last >= prior_high:
+        return ("Breakout to new highs", [(n - 1, last, "breakout")])
+
+    mins, maxs = _local_min_idx(lows), _local_max_idx(highs)
+
+    # Double / triple bottom: 2-3 similar swing lows, price now recovering.
+    if len(mins) >= 2:
+        recent = mins[-3:]
+        lvls = [lows[i] for i in recent]
+        base = min(lvls)
+        if base > 0 and (max(lvls) - min(lvls)) / base < 0.04 and last > base * 1.02:
+            name = "Triple bottom" if len(recent) >= 3 else "Double bottom"
+            return (name, [(i, lows[i], "bottom") for i in recent])
+
+    # Head & shoulders (bearish): three peaks, middle highest, shoulders even.
+    if len(maxs) >= 3:
+        p = maxs[-3:]
+        h = [highs[i] for i in p]
+        if h[1] > h[0] and h[1] > h[2] and abs(h[0] - h[2]) / h[1] < 0.05:
+            return ("Head & shoulders (bearish)",
+                    [(p[0], h[0], "L shoulder"), (p[1], h[1], "head"),
+                     (p[2], h[2], "R shoulder")])
+
+    # Bull flag / pullback within an uptrend.
+    if (last > sma and closes[-1] > closes[-4]
+            and (max(closes[-12:]) - last) / max(closes[-12:]) < 0.06):
+        return ("Bull flag / pullback", [])
+
+    if last > sma:
+        return ("Uptrend (higher lows)", [])
+    return ("Range / no clear pattern", [])
 
 
 def rank_relaxed(bars_by_symbol: dict[str, List[Bar]]) -> List[SymbolScore]:
