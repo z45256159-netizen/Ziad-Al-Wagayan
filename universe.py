@@ -11,6 +11,7 @@ automatically pick up whatever is here.
 # Plain-English "what this company actually does" — so you know what you're
 # buying, not just a ticker. Add a line here when you add a ticker.
 DESCRIPTIONS = {
+    "SPY": "SPY — an ETF that tracks the whole S&P 500 (the 500 biggest US companies).",
     "AAPL": "Apple — makes the iPhone, Mac, iPad, and services (App Store, iCloud).",
     "MSFT": "Microsoft — Windows, Office, Azure cloud, and Xbox.",
     "GOOGL": "Google (Alphabet) — search, YouTube, ads, and Google Cloud.",
@@ -53,6 +54,8 @@ def describe(symbol: str) -> str:
 
 # ~30 large/mid-cap, highly-liquid S&P 500 names across sectors.
 UNIVERSE = [
+    # Broad-market ETF
+    "SPY",
     # Mega-cap tech
     "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA", "AVGO",
     # Semis / hardware
