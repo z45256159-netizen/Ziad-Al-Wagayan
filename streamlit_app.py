@@ -308,9 +308,13 @@ def build_trade():
         f"profit **${plan.reward_total:,.2f}** if it hits\n"
         f"- ⚖️ Risk/reward: **1 : {plan.rr_ratio:g}**"
     )
-    parts.append(f"📈 **[Open {plan.symbol} on TradingView]"
-                 f"({tradingview_url(plan.symbol)})** — the chart with your "
-                 "levels is drawn below.")
+    parts.append(
+        f"📈 **[Open {plan.symbol} on TradingView]({tradingview_url(plan.symbol)})** "
+        "— the chart with your levels is drawn below.\n\n"
+        "_To draw it there yourself: tap the **Long Position** tool (the ⊕/ruler "
+        f"icon), then set **Entry ${plan.entry:,.2f} · Stop ${plan.stop:,.2f} · "
+        f"Target ${plan.take_profit:,.2f}**. (TradingView can't pre-draw it from a "
+        "link — the box below is the same thing, already drawn.)_")
     parts.append("Place it? Tap **✅ Yes** or **❌ No** below (or type yes / no). "
                  "The stop-loss and take-profit are placed automatically with it.")
 
