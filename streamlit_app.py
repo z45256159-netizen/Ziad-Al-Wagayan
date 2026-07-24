@@ -517,9 +517,54 @@ def _build_technical(bars, tradeable, buying_power, market_open, forced, allowed
     return "\n\n".join(parts), {"plan": plan, "below_bar": below_bar}
 
 
-def place_pending() -> None:
+def guardrail_block(cost: float):
+    """Return a reason string if a SAFETY rule should block a new trade, else
+    None. Applies to both manual (Yes) and the hands-free auto-trader."""
+    try:
+        a = broker.get_account()
+    except BrokerError:
+        return None  # can't check → don't block (fail open, but rare)
+
+    limit = float(ss.get("daily_loss_limit", 0) or 0)
+    if limit > 0:
+        try:
+            dollars, _ = broker.today_pl()
+        except BrokerError:
+            dollars = 0.0
+        if dollars <= -abs(limit):
+            return (f"🛑 **Daily loss limit hit.** You're down ${-dollars:,.0f} "
+                    f"today (your limit is ${limit:,.0f}). No new trades for now — "
+                    f"come back tomorrow, or change the limit in ⚙️ Settings → "
+                    f"Safety.")
+
+    try:
+        n = len(broker.get_positions())
+    except BrokerError:
+        n = 0
+    if n >= int(ss.get("max_positions", 10)):
+        return (f"🛑 **Max open positions reached** ({n}). Close one first, or "
+                f"raise the limit in ⚙️ Settings → Safety.")
+
+    pv = float(getattr(a, "portfolio_value", 0) or 0)
+    max_pct = float(ss.get("max_pos_pct", 25))
+    if pv > 0 and cost > pv * max_pct / 100:
+        return (f"🛑 **That trade is too big** — ${cost:,.0f} is over {max_pct:.0f}% "
+                f"of your ${pv:,.0f} portfolio. Lower **Max per order** or raise "
+                f"the limit in ⚙️ Settings → Safety.")
+    return None
+
+
+def place_pending() -> bool:
+    """Place the pending bracket order. Returns True if it was actually sent."""
     plan = ss.pending["plan"]
+    below_bar = ss.pending.get("below_bar", False)
     ss.pending = None
+
+    block = guardrail_block(plan.cost)
+    if block:
+        say("assistant", block)
+        return False
+
     try:
         order = broker.submit_bracket_order(
             symbol=plan.symbol,
@@ -534,6 +579,12 @@ def place_pending() -> None:
         exit_word = "BUY-to-cover" if plan.side == "sell" else "SELL"
         entry_desc = (f"LIMIT @ ${plan.limit_price:,.2f} (fills when price reaches it)"
                       if plan.limit_price else "@ market")
+        # Log it to this session's track record.
+        ss.trade_log.append({
+            "symbol": plan.symbol, "side": plan.side, "qty": plan.qty,
+            "entry": plan.entry, "stop": plan.stop, "target": plan.take_profit,
+            "below_bar": below_bar,
+        })
         say("assistant",
             f"✅ **3 orders placed** for **{order.symbol}** (bracket):\n"
             f"1. **{entry_word} {order.qty}** {entry_desc} — status *{status}*\n"
@@ -543,10 +594,68 @@ def place_pending() -> None:
             f"cancels the other. (Order id `{order.id}`.)\n\n"
             f"_If the market is closed the entry queues until 9:30am ET, and the "
             f"stop/target activate once it fills._")
+        return True
     except BrokerError as exc:
         say("assistant", f"❌ Order failed: {exc}\n\n_(If it mentions the market "
                          "being closed or a bracket rule, try during market "
                          "hours.)_")
+        return False
+
+
+def manage_exits() -> list:
+    """Protect open winners: once a position is up enough, move its stop to
+    breakeven, then trail it behind the price so profit is locked in. Returns a
+    list of human-readable notes about what changed."""
+    notes = []
+    try:
+        positions = broker.get_positions()
+    except BrokerError:
+        return notes
+    be_trig = float(ss.get("be_trigger_pct", 1.5))
+    trail = float(ss.get("trail_pct", 4.0))
+    for p in positions:
+        try:
+            side = str(getattr(p, "side", "long")).lower()   # 'long' / 'short'
+            entry = float(p.avg_entry_price)
+            cur = float(p.current_price)
+        except Exception:  # noqa: BLE001
+            continue
+        if entry <= 0 or cur <= 0:
+            continue
+        gain_pct = ((cur - entry) / entry * 100 if side == "long"
+                    else (entry - cur) / entry * 100)
+        if gain_pct < be_trig:
+            continue  # not enough profit yet to bother protecting
+        stop_order = broker.find_stop_order(p.symbol, side)
+        if stop_order is None:
+            continue
+        try:
+            cur_stop = float(getattr(stop_order, "stop_price", 0) or 0)
+        except Exception:  # noqa: BLE001
+            cur_stop = 0.0
+
+        if side == "long":
+            desired = max(entry, cur * (1 - trail / 100))      # breakeven, then trail
+            new_stop = max(cur_stop, desired)
+            if new_stop >= cur:                                # never at/above price
+                new_stop = round(cur * 0.999, 2)
+            improved = new_stop > cur_stop + max(0.01, cur_stop * 0.001)
+        else:
+            desired = min(entry, cur * (1 + trail / 100))
+            new_stop = min(cur_stop, desired) if cur_stop > 0 else desired
+            if new_stop <= cur:                                # never at/below price
+                new_stop = round(cur * 1.001, 2)
+            improved = new_stop < cur_stop - max(0.01, cur_stop * 0.001)
+
+        if not improved:
+            continue
+        try:
+            broker.replace_stop(getattr(stop_order, "id", None), round(new_stop, 2))
+            notes.append(f"🛡️ **{p.symbol}**: stop moved up to ${new_stop:,.2f} "
+                         f"(now +{gain_pct:.1f}% — profit protected).")
+        except BrokerError as exc:
+            notes.append(f"⚠️ **{p.symbol}**: couldn't move the stop ({exc}).")
+    return notes
 
 
 def auto_place_one() -> None:
@@ -556,8 +665,8 @@ def auto_place_one() -> None:
     say("assistant", "🔁 " + msg)
     if pending is not None:
         ss.pending = pending
-        place_pending()
-        ss.auto_count += 1
+        if place_pending():
+            ss.auto_count += 1
 
 
 def handle_command(text: str) -> None:
@@ -631,6 +740,15 @@ ss.setdefault("auto_max", 5)           # max trades per run
 ss.setdefault("auto_interval", 60)     # seconds between trades
 ss.setdefault("auto_count", 0)         # trades placed this run
 ss.setdefault("backtest", None)        # cached backtest summary text
+ss.setdefault("trade_log", [])         # trades the bot placed this session
+# --- Safety guardrails (0 / high default = effectively off until you set them) ---
+ss.setdefault("daily_loss_limit", 0.0)  # $ down today that blocks new trades (0=off)
+ss.setdefault("max_positions", 10)      # most open positions at once
+ss.setdefault("max_pos_pct", 25.0)      # most % of portfolio in one new trade
+# --- Smarter exits (protect winners) ---
+ss.setdefault("protect_winners", False)
+ss.setdefault("be_trigger_pct", 1.5)    # move stop to breakeven once up this %
+ss.setdefault("trail_pct", 4.0)         # then trail the stop this far behind price
 
 # --- A little CSS polish (theme-aware) ---
 st.markdown("""
@@ -728,6 +846,41 @@ with st.expander("⚙️ Trading settings"):
                        "no confirmation. Use paper mode to practice.")
         else:
             st.info("Auto mode is ON (paper). Type **find** and it trades on its own.")
+
+    st.markdown("---")
+    st.markdown("**🛡️ Safety guardrails** — hard limits the bot can't cross.")
+    ss.daily_loss_limit = float(st.number_input(
+        "Stop trading if I'm down this much today ($) — 0 = off", 0, 100000,
+        int(ss.daily_loss_limit), step=50,
+        help="If your account is down this many dollars since yesterday's close, "
+             "no new trades are opened (manual or auto). 0 turns it off."))
+    ss.max_positions = int(st.number_input(
+        "Max open positions at once", 1, 50, int(ss.max_positions),
+        help="The bot won't open a new trade once you already hold this many."))
+    ss.max_pos_pct = float(st.slider(
+        "Max % of portfolio in one trade", 5.0, 100.0, float(ss.max_pos_pct), 5.0,
+        help="Blocks any single trade bigger than this share of your whole "
+             "portfolio, so you're never over-concentrated in one stock."))
+
+    st.markdown("---")
+    st.markdown("**🛡️ Protect winners** — trail the stop as a trade goes your way.")
+    ss.protect_winners = st.checkbox(
+        "Automatically move stops up on winners",
+        value=ss.protect_winners,
+        help="Once a trade is up enough, move its stop-loss to breakeven, then "
+             "trail it behind the price — so a winner can't turn back into a "
+             "loss. Runs while this page is open, and you can also do it on "
+             "demand with the button below.")
+    if ss.protect_winners:
+        cpc = st.columns(2)
+        ss.be_trigger_pct = float(cpc[0].slider(
+            "Protect once up (%)", 0.5, 10.0, float(ss.be_trigger_pct), 0.5,
+            help="Start protecting once the trade is up this much."))
+        ss.trail_pct = float(cpc[1].slider(
+            "Trail distance (%)", 1.0, 15.0, float(ss.trail_pct), 0.5,
+            help="Keep the stop this far behind the current price as it climbs."))
+
+    st.markdown("---")
     if st.button("Disconnect / change keys", use_container_width=True):
         ls_clear(_local_storage())   # forget saved keys on this device
         for k in ("connected", "broker", "cfg", "pending"):
@@ -749,6 +902,64 @@ st.caption(f"🔎 Mode: **{_mode_icon}**  ·  {_dir_icon}  "
 if st.button("🔎 Find me a trade", type="primary", use_container_width=True):
     handle_command("find")
     st.rerun()
+
+# --- 📈 How am I doing? — your REAL trades, not a backtest ---
+with st.expander("📈 How am I doing? (my real trades)"):
+    try:
+        acct = broker.get_account()
+        dpl, dpct = broker.today_pl()
+        cc = st.columns(2)
+        cc[0].metric("Today's P/L", f"${dpl:,.2f}", f"{dpct:+.2f}%")
+        cc[1].metric("Portfolio value", f"${float(acct.portfolio_value):,.0f}")
+    except BrokerError:
+        st.caption("Couldn't read your account right now.")
+
+    try:
+        _positions = broker.get_positions()
+    except BrokerError:
+        _positions = []
+    if _positions:
+        greens = sum(1 for p in _positions
+                     if float(getattr(p, "unrealized_pl", 0) or 0) >= 0)
+        st.caption(f"**Open positions: {len(_positions)}**  ·  {greens} green / "
+                   f"{len(_positions) - greens} red")
+        for p in _positions:
+            pl = float(getattr(p, "unrealized_pl", 0) or 0)
+            plpc = float(getattr(p, "unrealized_plpc", 0) or 0) * 100
+            side = str(getattr(p, "side", "long")).lower()
+            emoji = "🟢" if pl >= 0 else "🔴"
+            row = st.columns([3, 1])
+            row[0].markdown(
+                f"{emoji} **{p.symbol}** ({side}) ×{float(p.qty):g} · now "
+                f"${float(p.current_price):,.2f} · P/L **${pl:,.2f}** "
+                f"({plpc:+.1f}%)")
+            if row[1].button("Close", key=f"close_{p.symbol}",
+                             use_container_width=True):
+                try:
+                    broker.close_position(p.symbol)
+                    say("assistant", f"✅ Closing **{p.symbol}** at market.")
+                except BrokerError as exc:
+                    say("assistant", f"❌ Couldn't close {p.symbol}: {exc}")
+                st.rerun()
+    else:
+        st.caption("No open positions yet — tap **Find me a trade** to start.")
+
+    _tl = ss.get("trade_log", [])
+    if _tl:
+        st.caption(f"**Placed this session:** {len(_tl)} — " +
+                   ", ".join(f"{t['symbol']} ({t['side']})" for t in _tl[-8:]))
+
+    if st.button("🛡️ Protect my winners now", use_container_width=True):
+        _notes = manage_exits()
+        if _notes:
+            for _n in _notes:
+                say("assistant", _n)
+        else:
+            say("assistant", "🛡️ No stops needed moving yet — no open position is "
+                             "far enough in profit. I'll keep watching.")
+        st.rerun()
+    st.caption("_'Today's P/L' is your account since yesterday's close — the most "
+               "honest read. Green/red counts your open trades right now._")
 
 # --- 🔁 Hands-free auto-trader (paper practice; runs only while this page is open) ---
 with st.expander("🔁 Auto-trader (hands-free)", expanded=ss.auto_loop):
@@ -776,19 +987,34 @@ with st.expander("🔁 Auto-trader (hands-free)", expanded=ss.auto_loop):
             say("assistant", f"⏹ Auto-trader stopped after {ss.auto_count} trade(s).")
             st.rerun()
 
-# The timer tick: while running, place one trade per interval, with guardrails.
-if ss.auto_loop:
+# The timer tick: drives the auto-trader AND/OR winner-protection while the page
+# is open. Winner-protection alone uses a gentler 60s beat.
+if ss.auto_loop or ss.protect_winners:
+    _interval = int(ss.auto_interval) * 1000 if ss.auto_loop else 60000
     try:
         from streamlit_autorefresh import st_autorefresh
-        st_autorefresh(interval=int(ss.auto_interval) * 1000, key="auto_loop_timer")
+        st_autorefresh(interval=_interval, key="loop_timer")
     except Exception:
-        st.warning("Auto-refresh unavailable — auto-trader can't run on this build.")
+        if ss.auto_loop:
+            st.warning("Auto-refresh unavailable — auto-trader can't run on this "
+                       "build.")
         ss.auto_loop = False
 
-    if ss.auto_loop and ss.auto_count >= ss.auto_max:
+# Winner-protection: trail stops on any open winners each tick (no chat spam
+# unless something actually moved).
+if ss.protect_winners:
+    try:
+        if broker.is_market_open():
+            for _n in manage_exits():
+                say("assistant", _n)
+    except BrokerError:
+        pass
+
+if ss.auto_loop:
+    if ss.auto_count >= ss.auto_max:
         ss.auto_loop = False
         say("assistant", f"✅ Auto-trader finished — placed {ss.auto_count} trade(s).")
-    elif ss.auto_loop:
+    else:
         try:
             _open = broker.is_market_open()
         except BrokerError:

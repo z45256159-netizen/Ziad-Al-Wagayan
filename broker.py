@@ -96,6 +96,60 @@ class Broker:
         """Set of ticker symbols we currently hold — used to skip duplicates."""
         return {p.symbol for p in self.get_positions()}
 
+    def today_pl(self) -> tuple[float, float]:
+        """Today's profit/loss in (dollars, percent), from equity vs last_equity.
+        Reliable and account-level — what your account is up/down since yesterday."""
+        a = self.get_account()
+        equity = float(getattr(a, "equity", 0) or 0)
+        last = float(getattr(a, "last_equity", 0) or 0)
+        dollars = equity - last
+        pct = (dollars / last * 100) if last else 0.0
+        return round(dollars, 2), round(pct, 2)
+
+    def close_position(self, symbol: str):
+        """Flatten a single position at market (sells a long / covers a short)."""
+        try:
+            return self.trading.close_position(symbol)
+        except Exception as exc:  # noqa: BLE001
+            raise BrokerError(f"Could not close {symbol}: {exc}") from exc
+
+    # ------------------------------------------------------------- exit management
+    def get_open_orders(self) -> list:
+        """All currently-open orders (used to find & move protective stops).
+        Best-effort — returns [] if the SDK call isn't available."""
+        try:
+            from alpaca.trading.enums import QueryOrderStatus
+            from alpaca.trading.requests import GetOrdersRequest
+            req = GetOrdersRequest(status=QueryOrderStatus.OPEN)
+            return list(self.trading.get_orders(filter=req) or [])
+        except Exception:  # noqa: BLE001 - never break the app over this
+            try:
+                return list(self.trading.get_orders() or [])
+            except Exception:
+                return []
+
+    def find_stop_order(self, symbol: str, position_side: str):
+        """Find the open protective STOP order for a held position, or None.
+        For a long position the stop is a SELL; for a short it's a BUY."""
+        want_side = "sell" if position_side == "long" else "buy"
+        for o in self.get_open_orders():
+            if getattr(o, "symbol", None) != symbol:
+                continue
+            otype = str(getattr(o, "order_type", "") or getattr(o, "type", "")).lower()
+            oside = str(getattr(o, "side", "")).lower()
+            if "stop" in otype and want_side in oside:
+                return o
+        return None
+
+    def replace_stop(self, order_id: str, new_stop: float):
+        """Move an existing stop order to a new stop price (trail / breakeven)."""
+        try:
+            from alpaca.trading.requests import ReplaceOrderRequest
+            return self.trading.replace_order_by_id(
+                order_id, ReplaceOrderRequest(stop_price=round(new_stop, 2)))
+        except Exception as exc:  # noqa: BLE001
+            raise BrokerError(f"Could not move stop: {exc}") from exc
+
     # --------------------------------------------------------------- market data
     def fetch_bars(self, symbols: List[str]) -> Dict[str, List[Bar]]:
         """

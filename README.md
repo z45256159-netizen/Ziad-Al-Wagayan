@@ -166,6 +166,22 @@ average R, and profit factor** using your current risk settings. It's an honest
 what-if on daily data — not a promise — but it lets you see the edge before you
 trust it with real money.
 
+### 🛡️ Safety, exits & your track record
+
+Three tools to keep you in control (all in the app — no config files):
+
+- **Safety guardrails** (⚙️ Settings → Safety) — hard limits the bot cannot
+  cross: a **daily loss limit** (stop opening trades once you're down $X today),
+  **max open positions**, and **max % of your portfolio in one trade**. They
+  apply to both manual and hands-free trades.
+- **Protect winners** (⚙️ Settings → Protect winners) — once a trade is up
+  enough, the bot moves its stop-loss to **breakeven** and then **trails** it
+  behind the price, so a winner can't turn back into a loss. It runs while the
+  page is open, or on demand with **🛡️ Protect my winners now**.
+- **"How am I doing?"** panel — your **real** results: today's account P/L,
+  portfolio value, and every open position with live profit/loss and a one-tap
+  **Close** button.
+
 ### 🔎 When nothing qualifies
 
 The engine won't invent a bad trade. When you tap **Find** manually and nothing
