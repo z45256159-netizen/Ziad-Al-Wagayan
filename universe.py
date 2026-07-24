@@ -43,6 +43,26 @@ DESCRIPTIONS = {
     "BA": "Boeing — makes commercial jets and defense aircraft.",
     "XOM": "ExxonMobil — oil and gas (energy).",
     "CVX": "Chevron — oil and gas (energy).",
+    # More liquid large-caps (more candidates = more good setups)
+    "QQQ": "QQQ — an ETF that tracks the 100 biggest Nasdaq (tech-heavy) companies.",
+    "NFLX": "Netflix — streaming movies and TV.",
+    "DIS": "Disney — movies, theme parks, and streaming (Disney+).",
+    "CRM": "Salesforce — cloud software for sales and customer management.",
+    "ADBE": "Adobe — Photoshop, Acrobat/PDF, and creative software.",
+    "ORCL": "Oracle — databases and enterprise cloud software.",
+    "CSCO": "Cisco — networking hardware and cybersecurity.",
+    "PEP": "PepsiCo — sodas, snacks (Frito-Lay), and drinks.",
+    "KO": "Coca-Cola — sodas and beverages worldwide.",
+    "ABBV": "AbbVie — a big pharmaceutical company (Humira, immunology).",
+    "MRK": "Merck — drugmaker (cancer drug Keytruda, vaccines).",
+    "TMO": "Thermo Fisher — lab equipment and life-science tools.",
+    "T": "AT&T — phone and internet (telecom).",
+    "VZ": "Verizon — phone and internet (telecom).",
+    "PYPL": "PayPal — online payments and Venmo.",
+    "UBER": "Uber — rideshare and food delivery.",
+    "PLTR": "Palantir — big-data and AI software for governments and companies.",
+    "SHOP": "Shopify — software that lets businesses run online stores.",
+    "COIN": "Coinbase — a crypto exchange (buy/sell Bitcoin, etc.).",
 }
 
 
@@ -52,20 +72,23 @@ def describe(symbol: str) -> str:
                             f"{symbol.upper()} — a publicly traded US company.")
 
 
-# ~30 large/mid-cap, highly-liquid S&P 500 names across sectors.
+# ~50 large/mid-cap, highly-liquid names across sectors. A bigger, more varied
+# list means the scanner almost always finds a clean setup somewhere.
 UNIVERSE = [
-    # Broad-market ETF
-    "SPY",
+    # Broad-market ETFs (benchmarks + steady movers)
+    "SPY", "QQQ",
     # Mega-cap tech
-    "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA", "AVGO",
+    "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA", "AVGO", "NFLX",
+    # Software / internet
+    "CRM", "ADBE", "ORCL", "CSCO", "PLTR", "SHOP", "UBER", "PYPL", "COIN", "DIS",
     # Semis / hardware
     "AMD", "INTC", "QCOM", "MU",
     # Financials
     "JPM", "BAC", "GS", "V", "MA",
     # Healthcare
-    "JNJ", "UNH", "PFE", "LLY",
+    "JNJ", "UNH", "PFE", "LLY", "ABBV", "MRK", "TMO",
     # Consumer
-    "WMT", "COST", "HD", "MCD", "NKE", "SBUX",
-    # Industrials / energy
-    "CAT", "BA", "XOM", "CVX",
+    "WMT", "COST", "HD", "MCD", "NKE", "SBUX", "PEP", "KO",
+    # Industrials / energy / telecom
+    "CAT", "BA", "XOM", "CVX", "T", "VZ",
 ]

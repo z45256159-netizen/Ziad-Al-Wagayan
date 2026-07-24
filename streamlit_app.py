@@ -2,9 +2,10 @@
 Alpaca trading bot — chat-style website.
 
 Flow:
-  1. Paste your Alpaca keys (and optional free Groq key). The app checks them.
-  2. Chat: type "find" and it finds one trade, shows the reason, and asks you.
-  3. Tap Yes to place it, No to skip.
+  1. Paste your Alpaca keys once. The app checks them. That's all it needs.
+  2. Tap "🔎 Find me a trade" (or type "find"): the built-in engine scans, and
+     if a setup clears the reward:risk bar it shows the reason and asks you.
+  3. Tap Yes to place it (bracket: entry + stop-loss + take-profit), No to skip.
 
 Run locally:  streamlit run streamlit_app.py
 Deploy free:  see README (Streamlit Community Cloud).
@@ -16,10 +17,9 @@ import os
 import random
 
 import streamlit as st
-from ai import verify_key, vision_pattern
 from analysis import explain_setup, invest_analysis, news_sentiment
 from broker import Broker, BrokerError
-from chart import chart_png, make_position_chart, tradingview_url
+from chart import make_position_chart, tradingview_url
 from config import Config, ConfigError
 from engine import MIN_RR, build_setup
 from sizing import TradePlan
@@ -35,7 +35,6 @@ ss.setdefault("messages", [])      # chat history: [{"role","content"}]
 ss.setdefault("pending", None)     # trade awaiting yes/no: {"c","s","ai"}
 ss.setdefault("broker", None)
 ss.setdefault("cfg", None)
-ss.setdefault("groq_key", "")
 ss.setdefault("recent", [])        # last few tickers suggested, for variety
 ss.setdefault("view", None)        # {plan, bars} for the chart of the latest pick
 
@@ -57,7 +56,7 @@ def say(role: str, content: str) -> None:
 # ===========================================================================
 # 1) CONNECT — auto-connect from saved Secrets, else show a one-time form
 # ===========================================================================
-def _connect(alp_key, alp_sec, groq_key, live, verify_groq=True):
+def _connect(alp_key, alp_sec, live):
     """Returns (ok, error_message). On success, stores everything in session."""
     try:
         cfg = Config(
@@ -78,21 +77,12 @@ def _connect(alp_key, alp_sec, groq_key, live, verify_groq=True):
     except BrokerError as exc:
         return False, f"Alpaca keys didn't work: {exc}"
 
-    gk = groq_key.strip()
-    groq_msg = "No AI key — the built-in scanner will decide trades."
-    if gk:
-        if not verify_groq or verify_key(gk):
-            groq_msg = "🤖 Groq AI connected — it will pick and explain trades."
-        else:
-            gk = ""
-            groq_msg = "⚠️ That Groq key didn't work, so the built-in scanner will decide."
-
-    ss.broker, ss.cfg, ss.groq_key = broker, cfg, gk
+    ss.broker, ss.cfg = broker, cfg
     ss.connected, ss.messages, ss.pending = True, [], None
     say("assistant",
-        f"✅ Connected to Alpaca ({cfg.mode_name}). {groq_msg}\n\n"
-        f"Type **find** to find a trade. You can also type **balance** or "
-        f"**positions**.")
+        f"✅ Connected to Alpaca ({cfg.mode_name}).\n\n"
+        f"Tap **🔎 Find me a trade** (or type **find**). You can also type "
+        f"**balance** or **positions**.")
     return True, None
 
 
@@ -120,13 +110,12 @@ def ls_get(ls, name: str) -> str:
         return ""
 
 
-def ls_save(ls, alp_key: str, alp_sec: str, groq_key: str, live: bool) -> None:
+def ls_save(ls, alp_key: str, alp_sec: str, live: bool) -> None:
     if ls is None:
         return
     try:
         ls.setItem("ALPACA_API_KEY", alp_key, key="ls_ak")
         ls.setItem("ALPACA_API_SECRET", alp_sec, key="ls_as")
-        ls.setItem("GROQ_API_KEY", groq_key, key="ls_gk")
         ls.setItem("LIVE", "true" if live else "false", key="ls_lv")
     except Exception:
         pass
@@ -136,7 +125,7 @@ def ls_clear(ls) -> None:
     if ls is None:
         return
     for name, wk in (("ALPACA_API_KEY", "d_ak"), ("ALPACA_API_SECRET", "d_as"),
-                     ("GROQ_API_KEY", "d_gk"), ("LIVE", "d_lv")):
+                     ("LIVE", "d_lv")):
         try:
             ls.deleteItem(name, key=wk)
         except Exception:
@@ -150,8 +139,7 @@ if not ss.connected:
     if saved_key and saved_sec and not ss.get("auto_tried"):
         ss.auto_tried = True
         with st.spinner("Connecting…"):
-            ok, _err = _connect(saved_key, saved_sec, _secret("GROQ_API_KEY"),
-                                _live_flag())
+            ok, _err = _connect(saved_key, saved_sec, _live_flag())
         if ok:
             st.rerun()
 
@@ -165,8 +153,7 @@ if not ss.connected:
         if rk and rs:
             ss.ls_tried = True
             with st.spinner("Connecting…"):
-                ok, _err = _connect(rk, rs, ls_get(_ls, "GROQ_API_KEY"),
-                                    ls_get(_ls, "LIVE") == "true")
+                ok, _err = _connect(rk, rs, ls_get(_ls, "LIVE") == "true")
             if ok:
                 st.rerun()
 
@@ -181,23 +168,21 @@ if not ss.connected:
                                 type="password")
         alp_sec = st.text_input("Alpaca API secret", value=_secret("ALPACA_API_SECRET"),
                                 type="password")
-        st.markdown("**Groq key** — free AI that runs Llama (from "
-                    "console.groq.com). Optional.")
-        groq_key = st.text_input("Groq API key (free Llama AI)",
-                                 value=_secret("GROQ_API_KEY"), type="password")
         live = st.checkbox("⚠️ Live trading (REAL money)", value=_live_flag())
         remember = st.checkbox("💾 Remember me on this device", value=True)
         submitted = st.form_submit_button("Connect", use_container_width=True,
                                           type="primary")
 
+    st.caption("That's all you need — no other keys, no sign-ups. The trade "
+               "engine is built in.")
+
     if submitted:
         with st.spinner("Checking your keys…"):
-            ok, err = _connect(alp_key, alp_sec, groq_key, live)
+            ok, err = _connect(alp_key, alp_sec, live)
         if ok:
             if remember:
                 # Reuse the same handle created above (don't build a second one).
-                ls_save(_ls, alp_key.strip(), alp_sec.strip(),
-                        groq_key.strip(), live)
+                ls_save(_ls, alp_key.strip(), alp_sec.strip(), live)
             st.rerun()
         else:
             st.error(f"❌ {err}")
@@ -224,8 +209,13 @@ def _setup_to_plan(setup) -> TradePlan:
         side=setup.side, direction=setup.direction, limit_price=setup.limit_price)
 
 
-def build_trade():
-    """Scan and pick one trade. Returns (assistant_text, pending_dict_or_None)."""
+def build_trade(allow_fallback=True):
+    """Scan and pick one trade. Returns (assistant_text, pending_dict_or_None).
+
+    allow_fallback: when True (manual find), if nothing clears the reward:risk
+    bar we surface the best-available setup clearly flagged. When False (the
+    auto-trader), we stay strict and place nothing rather than a sub-par trade.
+    """
     ss.view = None  # clear any previous chart until we have a fresh plan
     try:
         market_open = broker.is_market_open()
@@ -270,7 +260,7 @@ def build_trade():
     if ss.scan_mode == "Best performers":
         return _build_investing(bars, tradeable, buying_power, market_open)
     return _build_technical(bars, tradeable, buying_power, market_open,
-                            forced, allowed)
+                            forced, allowed, allow_fallback)
 
 
 # ---------------------------------------------------------------------------
@@ -383,13 +373,14 @@ def _build_investing(bars, tradeable, buying_power, market_open):
     ss.view = {"plan": plan, "bars": chart_bars,
                "support": candidate.support, "resistance": candidate.resistance,
                "marks": []}
-    return "\n\n".join(parts), {"plan": plan, "ai": None}
+    return "\n\n".join(parts), {"plan": plan, "below_bar": False}
 
 
 # ---------------------------------------------------------------------------
 # TECHNICAL  →  engine scan: only take a VALIDATED, risk-gated setup, or none.
 # ---------------------------------------------------------------------------
-def _build_technical(bars, tradeable, buying_power, market_open, forced, allowed):
+def _build_technical(bars, tradeable, buying_power, market_open, forced, allowed,
+                     allow_fallback=True):
     fresh = [c for c in tradeable if c.symbol not in ss.recent]
     pool_top = (fresh if fresh else tradeable)[:12]
 
@@ -402,33 +393,51 @@ def _build_technical(bars, tradeable, buying_power, market_open, forced, allowed
 
     # Build a validated setup for each name. Only geometry-valid, reward:risk-
     # passing setups survive. Nothing is forced.
-    valid = []  # list of (candidate, setup)
-    for c in pool_top:
-        pd = direction_of(c.pattern)
-        dirs = [pd] + [d for d in ("long", "short") if d != pd] \
-            if (forced is None and pd in ("long", "short")) \
-            else ([forced] if forced else ["long", "short"])
-        for d in dirs:
-            if not allowed(d):
-                continue
-            s = build_setup(c.symbol, bars[c.symbol], d, buying_power,
-                            ss.risk_pct, ss.max_order,
-                            vol_ratio=getattr(c, "volume_ratio", 1.0),
-                            news_score=0, min_rr=ss.min_rr)
-            if s.ok:
-                valid.append((c, s))
-                break  # one direction per symbol
+    def scan(min_rr):
+        out = []
+        for c in pool_top:
+            pd = direction_of(c.pattern)
+            dirs = [pd] + [d for d in ("long", "short") if d != pd] \
+                if (forced is None and pd in ("long", "short")) \
+                else ([forced] if forced else ["long", "short"])
+            for d in dirs:
+                if not allowed(d):
+                    continue
+                s = build_setup(c.symbol, bars[c.symbol], d, buying_power,
+                                ss.risk_pct, ss.max_order,
+                                vol_ratio=getattr(c, "volume_ratio", 1.0),
+                                news_score=0, min_rr=min_rr)
+                if s.ok:
+                    out.append((c, s))
+                    break  # one direction per symbol
+        return out
 
+    valid = scan(ss.min_rr)
+    below_bar = False
     if not valid:
-        return (f"🚫 **No trade right now.** I scanned the whole watchlist and "
-                f"nothing offered a clean, validated setup with a good "
-                f"reward-to-risk (≥ 1:{ss.min_rr:g}) in your allowed direction.\n\n"
-                f"**Quality over quantity** — I won't force a bad trade. "
-                f"Try **find** again later, or widen the direction in settings."), None
-
-    # Pick among the top-confidence setups for a little variety.
-    valid.sort(key=lambda t: t[1].confidence, reverse=True)
-    candidate, setup = random.choice(valid[:3])
+        # Nothing cleared your bar. Rather than always saying "no trade", find
+        # the closest COHERENT setup (still a real stop/target, just a lower
+        # reward:risk) so you have something to look at — clearly flagged, and
+        # never auto-placed.
+        if not allow_fallback:
+            return (f"🚫 **No trade right now.** Nothing on the watchlist offered "
+                    f"a clean setup at your minimum reward:risk (1:{ss.min_rr:g}) "
+                    f"in the allowed direction. Auto-trader stays strict and "
+                    f"skips."), None
+        near = scan(0.0)
+        if not near:
+            return ("🚫 **No trade right now.** I couldn't build a single "
+                    "coherent setup on the watchlist in your allowed direction "
+                    "(often the case when the market's been flat/closed). Try "
+                    "**find** again later, or switch direction to **Both** in "
+                    "settings."), None
+        near.sort(key=lambda t: t[1].rr, reverse=True)  # best available R:R
+        candidate, setup = near[0]
+        below_bar = True
+    else:
+        # Pick among the top-confidence setups for a little variety.
+        valid.sort(key=lambda t: t[1].confidence, reverse=True)
+        candidate, setup = random.choice(valid[:3])
     sym = candidate.symbol
     ss.recent = ([sym] + ss.recent)[:3]
     chart_bars = bars[sym][-40:]
@@ -438,61 +447,33 @@ def _build_technical(bars, tradeable, buying_power, market_open, forced, allowed
     sent_label, sent_emoji, _ = news_sentiment(news)
     news_score = 1 if sent_label == "BULLISH" else -1 if sent_label == "BEARISH" else 0
 
-    # 🔍 CHART-VISION: let a Groq model actually LOOK at the chart and, if it's
-    # confident, confirm or flip the direction. We only accept a flip if the
-    # rebuilt setup is still valid.
-    vision = None
-    if ss.groq_key:
-        with st.spinner("🔍 AI is looking at the chart…"):
-            img = chart_png(chart_bars)
-            if img:
-                vision = vision_pattern(img, ss.groq_key,
-                                        _secret("AI_VISION_MODEL", "").strip() or None)
-    used_vision = bool(vision and vision.pattern
-                       and vision.pattern.lower() not in ("none", "no clear pattern", ""))
-    direction = setup.direction
-    if used_vision and vision.direction in ("long", "short") and allowed(vision.direction):
-        direction = vision.direction
-
-    # Rebuild with the news score (and possibly the vision direction).
-    rebuilt = build_setup(sym, bars[sym], direction, buying_power, ss.risk_pct,
+    # Rebuild with the news score folded in (keep the same direction).
+    rebuilt = build_setup(sym, bars[sym], setup.direction, buying_power, ss.risk_pct,
                           ss.max_order, vol_ratio=getattr(candidate, "volume_ratio", 1.0),
-                          news_score=news_score, min_rr=ss.min_rr)
+                          news_score=news_score, min_rr=0.0 if below_bar else ss.min_rr)
     if rebuilt.ok:
         setup = rebuilt
-    else:
-        # Vision's direction didn't validate — keep the original but re-score news.
-        rb2 = build_setup(sym, bars[sym], setup.direction, buying_power, ss.risk_pct,
-                          ss.max_order, vol_ratio=getattr(candidate, "volume_ratio", 1.0),
-                          news_score=news_score, min_rr=ss.min_rr)
-        if rb2.ok:
-            setup = rb2
-        used_vision = False
 
     plan = _setup_to_plan(setup)
 
     parts = [f"### 📊 {sym} @ ${plan.entry:,.2f}"]
+    if below_bar:
+        parts.append(f"⚠️ **Below your quality bar** — nothing hit your minimum "
+                     f"reward:risk (1:{ss.min_rr:g}) today, so this is just the "
+                     f"**best available** setup (1:{plan.rr_ratio:g}). Consider "
+                     f"skipping, or lower the bar in Settings.")
     parts.append(f"**Market regime:** {setup.regime}")
     conf_blocks = "█" * (setup.confidence // 10) + "░" * (10 - setup.confidence // 10)
     parts.append(f"**Confidence: {setup.confidence}/100**  `{conf_blocks}`")
-    if used_vision:
-        vbadge = {"GO": "🟢", "CAUTION": "🟡", "NO-GO": "🔴"}.get(
-            vision.recommendation, "🔍")
-        parts.append(f"🔍 **The AI looked at the chart** and sees: "
-                     f"**{vision.pattern}** ({vision.confidence} confidence · "
-                     f"{vbadge} {vision.recommendation}).")
-        if vision.rationale:
-            parts.append(f"_{vision.rationale}_")
-    else:
-        parts.append(f"📐 **Setup found: {candidate.pattern}**")
-        info = explain_setup(candidate.pattern, candidate.support,
-                             candidate.resistance, plan.entry,
-                             pattern_marks.get(sym, []))
-        if info:
-            what, why, how = info
-            parts.append(f"**How I found it:** {sym} shows {what}.\n\n"
-                         f"**Why it's a signal:** {why}.\n\n"
-                         f"**How to trade it:** {how}.")
+    parts.append(f"📐 **Setup found: {candidate.pattern}**")
+    info = explain_setup(candidate.pattern, candidate.support,
+                         candidate.resistance, plan.entry,
+                         pattern_marks.get(sym, []))
+    if info:
+        what, why, how = info
+        parts.append(f"**How I found it:** {sym} shows {what}.\n\n"
+                     f"**Why it's a signal:** {why}.\n\n"
+                     f"**How to trade it:** {how}.")
     if setup.reasons:
         parts.append("**Why this trade:**\n" +
                      "\n".join(f"- {r}" for r in setup.reasons))
@@ -533,7 +514,7 @@ def _build_technical(bars, tradeable, buying_power, market_open, forced, allowed
     ss.view = {"plan": plan, "bars": chart_bars,
                "support": candidate.support, "resistance": candidate.resistance,
                "marks": pattern_marks.get(sym, [])}
-    return "\n\n".join(parts), {"plan": plan, "ai": None}
+    return "\n\n".join(parts), {"plan": plan, "below_bar": below_bar}
 
 
 def place_pending() -> None:
@@ -569,8 +550,9 @@ def place_pending() -> None:
 
 
 def auto_place_one() -> None:
-    """One hands-free cycle: find a trade and place it (used by the auto-trader)."""
-    msg, pending = build_trade()
+    """One hands-free cycle: find a trade and place it (used by the auto-trader).
+    Stays STRICT — only places a trade that fully cleared the quality gate."""
+    msg, pending = build_trade(allow_fallback=False)
     say("assistant", "🔁 " + msg)
     if pending is not None:
         ss.pending = pending
@@ -593,10 +575,12 @@ def handle_command(text: str) -> None:
             return
 
     if any(w in t for w in ("find", "scan", "trade", "buy something")):
-        msg, pending = build_trade()
+        # Auto mode stays strict (no below-the-bar fallback); manual can see the
+        # best-available pick.
+        msg, pending = build_trade(allow_fallback=not ss.auto_mode)
         if pending is not None and ss.auto_mode:
-            # The engine only returns a trade that already passed the quality +
-            # reward:risk gate, so in auto mode we show it and place it.
+            # In auto mode the trade already cleared the quality + reward:risk
+            # gate, so we show it and place it automatically.
             say("assistant", msg)   # show the plan
             ss.pending = pending
             place_pending()         # ...then place it automatically
@@ -646,6 +630,7 @@ ss.setdefault("auto_loop", False)      # hands-free auto-trader running?
 ss.setdefault("auto_max", 5)           # max trades per run
 ss.setdefault("auto_interval", 60)     # seconds between trades
 ss.setdefault("auto_count", 0)         # trades placed this run
+ss.setdefault("backtest", None)        # cached backtest summary text
 
 # --- A little CSS polish (theme-aware) ---
 st.markdown("""
@@ -745,8 +730,8 @@ with st.expander("⚙️ Trading settings"):
             st.info("Auto mode is ON (paper). Type **find** and it trades on its own.")
     if st.button("Disconnect / change keys", use_container_width=True):
         ls_clear(_local_storage())   # forget saved keys on this device
-        for k in ("connected", "broker", "cfg", "groq_key", "pending"):
-            ss[k] = False if k == "connected" else (None if k != "groq_key" else "")
+        for k in ("connected", "broker", "cfg", "pending"):
+            ss[k] = False if k == "connected" else None
         ss.messages = []
         ss.auto_tried = False
         ss.ls_tried = False
@@ -757,9 +742,13 @@ _mode_icon = "📈 Investing (best performers)" if ss.scan_mode == "Best perform
     else "📐 Technical (patterns)"
 _dir_icon = {"Both": "↔ Long & Short", "Long only": "🟢 Long only",
              "Short only": "🔻 Short only"}.get(ss.direction_mode, ss.direction_mode)
-_vision = "  ·  🔍 AI chart-vision ON" if ss.groq_key else ""
 st.caption(f"🔎 Mode: **{_mode_icon}**  ·  {_dir_icon}  "
-           f"·  {'🤖 Auto' if ss.auto_mode else '✋ Manual'}{_vision}")
+           f"·  {'🤖 Auto' if ss.auto_mode else '✋ Manual'}")
+
+# One-tap: no need to type. This is the main action.
+if st.button("🔎 Find me a trade", type="primary", use_container_width=True):
+    handle_command("find")
+    st.rerun()
 
 # --- 🔁 Hands-free auto-trader (paper practice; runs only while this page is open) ---
 with st.expander("🔁 Auto-trader (hands-free)", expanded=ss.auto_loop):
@@ -812,6 +801,39 @@ if ss.auto_loop:
         else:
             ss.auto_closed_said = False
             auto_place_one()
+
+# --- 📊 Backtest: proof on real history (does the engine actually work?) ---
+with st.expander("📊 Does it actually work? (backtest on real history)"):
+    st.caption("Replays months of real prices and simulates every trade the "
+               "engine WOULD have taken — win rate, average R (profit measured "
+               "in units of risk), and profit factor. It uses your current risk "
+               "settings. Past results never guarantee the future.")
+    if st.button("▶️ Run backtest on the watchlist", use_container_width=True):
+        with st.spinner("Replaying history across the watchlist…"):
+            try:
+                from backtest import backtest
+                book = broker.fetch_bars(UNIVERSE)
+                res = backtest(book, risk_pct=ss.risk_pct,
+                               max_order_dollars=ss.max_order)
+                lines = [res.summary()]
+                by_sym = {}
+                for tr in res.trades:
+                    by_sym.setdefault(tr.symbol, []).append(tr)
+                tops = sorted(by_sym.items(),
+                              key=lambda kv: sum(t.r_multiple for t in kv[1]),
+                              reverse=True)[:6]
+                for s, ts in tops:
+                    wr = sum(1 for t in ts if t.r_multiple > 0) / len(ts) * 100
+                    avg = sum(t.r_multiple for t in ts) / len(ts)
+                    lines.append(f"- **{s}** · {len(ts)} trades · {wr:.0f}% win · "
+                                 f"{avg:+.2f}R avg")
+                ss.backtest = "\n".join(lines)
+            except Exception as exc:  # noqa: BLE001
+                ss.backtest = f"Couldn't run the backtest: {exc}"
+    if ss.get("backtest"):
+        st.markdown(ss.backtest)
+        st.caption("R = reward-to-risk. +1R means it made exactly what it risked. "
+                   "Profit factor > 1 means winners outweighed losers.")
 
 st.divider()
 

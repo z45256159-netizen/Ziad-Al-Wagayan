@@ -87,10 +87,11 @@ Your `.env` is git-ignored, so your keys won't be committed.
 ## 🌐 The website (phone-friendly) — recommended
 
 The web version (`streamlit_app.py`) is a **chat** that works great on a phone.
-You **paste your keys right in the app** (it checks they work), then just type
-**find** — it finds one trade, explains it, and you tap **Yes** or **No** to
-place it. Deploy it free once and you get a permanent URL you open in your
-browser; after that there's no more setup — open the link, paste keys, chat.
+You **paste your Alpaca keys right in the app** (it checks they work) — that's
+the *only* thing you need, no other sign-ups — then tap the big **🔎 Find me a
+trade** button. It finds one trade, explains it, and you tap **Yes** or **No**
+to place it. Deploy it free once and you get a permanent URL you open in your
+browser; after that there's no more setup — open the link, paste keys, tap Find.
 
 > Why does it need hosting instead of being a plain link? Because it talks to
 > your real brokerage account. Your secret key must live on a server (never in a
@@ -105,8 +106,8 @@ browser; after that there's no more setup — open the link, paste keys, chat.
    `streamlit_app.py` as the main file.
 4. Click **Deploy**. You'll get a URL like `https://your-app.streamlit.app` —
    bookmark it on your phone.
-5. Open the link and **paste your keys in the app** — Alpaca key + secret, and
-   (optionally) your free Groq key. The app checks them, then you chat.
+5. Open the link and **paste your keys in the app** — just the Alpaca key +
+   secret. The app checks them, then you're in the chat. Nothing else to set up.
 
 ### Never type your keys again (recommended)
 
@@ -119,16 +120,14 @@ visit — straight to the chat, no form:
    ALPACA_API_KEY = "PK...your paper key..."
    ALPACA_API_SECRET = "...your paper secret..."
    LIVE = "false"
-   GROQ_API_KEY = "gsk_...your free Groq key..."
    ```
 3. Reopen the app — it connects automatically and drops you in the chat.
 
-### 🧠 The bot already has a brain (no AI needed)
+### 🧠 The engine is the brain (no AI key, no third-party sign-up)
 
 The **momentum + volume scanner** shortlists movers, then `engine.py` — the
-professional core — decides whether any of them is actually worth trading. You
-can trade with it and never turn on any AI. The AI further down is an optional
-*second opinion*.
+professional core — decides whether any of them is actually worth trading. It's
+completely self-contained: no OpenAI, no Groq, no extra API keys to chase down.
 
 **What the engine does (Technical mode):**
 
@@ -158,18 +157,26 @@ learning, not a substitute for company fundamentals.)
 engine's trades, reporting win rate, average R multiple, expectancy, and profit
 factor — an honest what-if on daily data, not a promise of future results.
 
-### 🤖 Optional: let a FREE AI pick the trade
+### 📊 "Does it actually work?" — the built-in backtest
 
-If you enter a **Groq** key when connecting, the AI reviews the qualifying
-candidates' real numbers, chooses one, and shows a plain-English
-GO / CAUTION / NO-GO rationale in the chat. Leave it blank and the rule-based
-scanner decides on its own — the app works fully either way.
+Open the **"Does it actually work? (backtest on real history)"** panel and tap
+**Run backtest**. The app replays months of real prices across the watchlist and
+simulates every trade the engine would have taken, then shows the **win rate,
+average R, and profit factor** using your current risk settings. It's an honest
+what-if on daily data — not a promise — but it lets you see the edge before you
+trust it with real money.
 
-> **It's free, and it's Groq (not OpenAI).** Get a free API key (no credit card)
-> from **[console.groq.com](https://console.groq.com)** → API Keys. Groq runs
-> fast open models (Llama 3.3 70B) at no cost. The AI only ever sees the
-> price/volume data the app already fetched; it never invents numbers, and if
-> the AI call fails the app falls back to the rule-based pick.
+### 🔎 When nothing qualifies
+
+The engine won't invent a bad trade. When you tap **Find** manually and nothing
+clears your minimum reward:risk, it shows the **best-available** setup clearly
+flagged *"below your quality bar"* so you always have something to look at (you
+decide whether to take it). The **auto-trader stays strict** — it places only
+trades that fully pass the gate, and otherwise places nothing.
+
+> No third-party AI keys are required or used by the web app anymore — the
+> engine is fully self-contained. (`ai.py` remains in the repo for anyone who
+> wants to wire an optional model back in, but it's off by default.)
 
 To go live later, change `LIVE` to `"true"` in the Secrets box (the app shows a
 loud red warning in live mode).
