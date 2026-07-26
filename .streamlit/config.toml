@@ -1,12 +1,11 @@
-# App theme — clean, minimalist, works in light or dark.
-# Streamlit picks base = "light"/"dark" from the viewer; these accents apply to both.
-
+# App theme — warm, editorial, readability-first (light).
 [theme]
-primaryColor = "#0891b2"          # teal/cyan accent (buttons, sliders, focus)
-backgroundColor = "#0b0f14"       # deep slate (app background)
-secondaryBackgroundColor = "#141b24"  # cards / inputs / expanders
-textColor = "#e6edf3"
-font = "sans serif"
+base = "light"
+primaryColor = "#a23b2d"              # warm terracotta accent (buttons, links)
+backgroundColor = "#fbfaf6"           # soft paper cream
+secondaryBackgroundColor = "#f3efe7"  # cards / inputs / expanders
+textColor = "#22201d"
+font = "serif"
 
 [client]
 toolbarMode = "minimal"

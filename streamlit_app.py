@@ -28,7 +28,6 @@ from strategy import (detect_pattern, direction_of, rank_candidates,
 from universe import UNIVERSE, describe
 
 APP_NAME = "Momentum"
-APP_TAGLINE = "AI-assisted trading — on your own Alpaca account"
 
 st.set_page_config(page_title=APP_NAME, page_icon="📈", layout="centered",
                    initial_sidebar_state="collapsed")
@@ -41,6 +40,7 @@ ss.setdefault("broker", None)
 ss.setdefault("cfg", None)
 ss.setdefault("recent", [])        # last few tickers suggested, for variety
 ss.setdefault("view", None)        # {plan, bars} for the chart of the latest pick
+ss.setdefault("paid", False)       # has valid one-time access (paywall)
 
 
 def _secret(name: str, default: str = "") -> str:
@@ -64,42 +64,304 @@ def say(role: str, content: str) -> None:
 def inject_css() -> None:
     st.markdown("""
 <style>
-#MainMenu, footer, [data-testid="stToolbar"] {visibility:hidden;}
-.block-container {padding-top:1.1rem; padding-bottom:5rem; max-width:720px;}
+@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@600;700;800&family=EB+Garamond:ital,wght@0,400;0,500;1,400&display=swap');
+
+#MainMenu, [data-testid="stToolbar"] {visibility:hidden;}
+.block-container {padding-top:1.4rem; padding-bottom:4rem; max-width:680px;}
 html, body, [class*="css"] {-webkit-font-smoothing:antialiased;}
 
-/* Hero / brand */
-.hero {text-align:center; padding:26px 20px 22px; border-radius:20px;
-       background:radial-gradient(120% 140% at 50% 0%, #0e7490 0%, #0b1220 60%);
-       border:1px solid rgba(255,255,255,.08); margin-bottom:1rem;}
-.hero .logo {font-size:2.1rem;}
-.hero .name {font-size:1.7rem; font-weight:800; letter-spacing:.3px; color:#fff;
-             margin:.15rem 0 .1rem;}
-.hero .tag {color:#a9c7d6; font-size:.92rem;}
+/* Editorial typography */
+h1, h2, h3, h4, .wordmark, .ed {
+  font-family:'Playfair Display', Georgia, 'Times New Roman', serif !important;
+  letter-spacing:.2px; color:#22201d;}
+.article, .article p, .lead {
+  font-family:'EB Garamond', Georgia, serif; font-size:1.12rem; line-height:1.75;
+  color:#33302b;}
 
-/* Compact header on the app screen */
+/* Masthead */
+.masthead {text-align:center; padding:14px 0 6px;}
+.masthead .wordmark {font-size:2.9rem; font-weight:800; line-height:1.05;}
+.masthead .subtitle {font-family:'EB Garamond',Georgia,serif; font-style:italic;
+  color:#7a7368; font-size:1.02rem; margin-top:.35rem;}
+
+/* Hairline rules + centered nav (the editorial look) */
+.rule {height:1px; background:#e6e0d4; margin:.7rem 0;}
+.nav {text-align:center; padding:.35rem 0 .1rem;}
+.nav a {font-family:'EB Garamond',Georgia,serif; text-transform:uppercase;
+  letter-spacing:.16em; font-size:.82rem; color:#6a6357; text-decoration:none;
+  margin:0 .85rem; padding-bottom:2px;}
+.nav a:hover {color:#a23b2d;}
+.nav a.on {color:#a23b2d; border-bottom:1px solid #a23b2d;}
+
+/* Marketing prose */
+.article {margin:1.2rem auto 0; max-width:600px;}
+.article h2 {font-size:1.7rem; margin:1.4rem 0 .5rem; text-align:center;}
+.article h3 {font-size:1.15rem; margin:1.3rem 0 .3rem;}
+.article .meta {text-align:center; text-transform:uppercase; letter-spacing:.14em;
+  font-size:.74rem; color:#9a9184; font-family:'EB Garamond',Georgia,serif;
+  margin-bottom:1rem;}
+.article a {color:#a23b2d;}
+.email {display:inline-block; font-family:'EB Garamond',Georgia,serif;
+  font-size:1.15rem; color:#a23b2d; border:1px solid #e0d8c8; border-radius:10px;
+  padding:.5rem 1rem; margin-top:.4rem; text-decoration:none;}
+.email:hover {background:#f3efe7;}
+
+/* App header (signed in) — light, editorial */
 .hdr {display:flex; align-items:center; justify-content:space-between;
-      background:linear-gradient(135deg,#0e7490,#0891b2); color:#fff;
-      padding:12px 16px; border-radius:14px; margin-bottom:.7rem;
-      box-shadow:0 6px 20px rgba(8,145,178,.22);}
-.hdr .t {font-size:1.05rem; font-weight:800; letter-spacing:.2px;}
-.pill {padding:4px 12px; border-radius:999px; font-weight:800; font-size:.68rem;
-       letter-spacing:.4px;}
-.pill.paper {background:#dcfce7; color:#166534;}
-.pill.live  {background:#fee2e2; color:#991b1b;}
+  border-bottom:1px solid #e6e0d4; padding:2px 2px 12px; margin-bottom:.7rem;}
+.hdr .t {font-family:'Playfair Display',Georgia,serif; font-size:1.5rem;
+  font-weight:800;}
+.pill {font-family:'EB Garamond',Georgia,serif; padding:3px 12px;
+  border-radius:999px; font-weight:600; font-size:.72rem; letter-spacing:.08em;
+  text-transform:uppercase;}
+.pill.paper {background:#e7efe4; color:#3f6b3a;}
+.pill.live  {background:#f6e2df; color:#9a3226;}
 
 /* Controls */
-.stButton>button {border-radius:12px; font-weight:700; padding:.6rem 1rem;
-                  border:1px solid rgba(255,255,255,.10);}
-.stButton>button[kind="primary"] {box-shadow:0 6px 18px rgba(8,145,178,.30);}
-[data-testid="stMetric"] {background:rgba(148,163,184,.10); padding:12px 14px;
-       border-radius:14px; border:1px solid rgba(148,163,184,.14);}
-[data-testid="stExpander"] {border-radius:14px; border:1px solid rgba(148,163,184,.16);}
-[data-testid="stChatInput"] textarea {border-radius:12px;}
-.foot {text-align:center; color:#7c8b99; font-size:.74rem; margin-top:1.4rem;
-       line-height:1.5;}
+.stButton>button {border-radius:10px; font-weight:600; padding:.55rem 1rem;
+  border:1px solid #e0d8c8;}
+[data-testid="stMetric"] {background:#f3efe7; padding:12px 14px;
+  border-radius:12px; border:1px solid #e6e0d4;}
+[data-testid="stExpander"] {border-radius:12px; border:1px solid #e6e0d4;}
+
+/* Footer */
+.foot {text-align:center; color:#9a9184; font-size:.8rem; margin-top:2rem;
+  padding-top:1rem; border-top:1px solid #e6e0d4; line-height:1.7;
+  font-family:'EB Garamond',Georgia,serif;}
+.foot a {color:#a23b2d; text-decoration:none;}
 </style>
 """, unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------------------
+# Marketing copy (warm, human, honest) — Home / About / Contact pages.
+# ---------------------------------------------------------------------------
+CONTACT_EMAIL = "zalwagayan@gmail.com"
+
+HOME_HTML = f"""
+<div class="article">
+<p class="lead">Most trading apps shout at you. Blinking tickers, hot tips, a
+hundred flashing numbers. We wanted the opposite — something calm and honest
+that does the patient work for you and explains itself in plain English.</p>
+
+<p><b>{APP_NAME}</b> watches a hand-picked list of well-known companies, waits
+for a genuinely good setup, and only then brings you one clear idea: what to
+buy or sell, where to place the stop-loss, where to take profit, and — most
+importantly — <i>why</i>. If nothing good is there, it says so. No forcing.</p>
+
+<h3>How it works</h3>
+<p>①&nbsp; Connect your own free Alpaca account.<br>
+②&nbsp; Tap <b>Find me a trade</b>.<br>
+③&nbsp; Read the reasoning, then tap Yes or No. That's it.</p>
+
+<p>It runs on <i>your</i> brokerage account, in practice (paper) mode by
+default, so you can learn without risking a cent. It is a tool to help you
+think — never financial advice.</p>
+</div>
+"""
+
+ABOUT_HTML = f"""
+<div class="article">
+<div class="meta">About</div>
+<h2>Patience, in software</h2>
+<p>{APP_NAME} started from a simple frustration: the tools that were supposed to
+help ordinary people trade mostly just made them anxious. They rewarded
+constant action, hid their reasoning, and treated every stock like a lottery
+ticket.</p>
+
+<p>We believe the opposite is closer to the truth. Good trading is mostly
+<i>waiting</i> — for a setup where the potential reward clearly outweighs the
+risk — and then managing that risk carefully. So we built a tool that does
+exactly that, and refuses to pretend when the moment isn't there.</p>
+
+<h3>What we care about</h3>
+<p><b>Honesty.</b> Every idea comes with its reasoning, its risk, and its
+reward. When the odds aren't good, it tells you to wait.</p>
+<p><b>Your control.</b> It uses your own Alpaca account and your own keys, kept
+only in your browser. We never hold your money or trade behind your back.</p>
+<p><b>Safety first.</b> Built-in guardrails — daily loss limits, position
+caps, trailing stops that protect winners — because keeping what you have
+matters more than any single trade.</p>
+
+<p>We're a small effort, not a giant firm, and we read every message. If
+something feels off or you have an idea, tell us — it genuinely shapes what we
+build next.</p>
+
+<p class="meta" style="margin-top:1.4rem;">Not financial advice · trading
+involves risk of loss</p>
+</div>
+"""
+
+CONTACT_HTML = f"""
+<div class="article">
+<div class="meta">Contact</div>
+<h2>Say hello</h2>
+<p style="text-align:center;">Questions, problems, bugs, or ideas — we'd love
+to hear from you, and a real person will read it.</p>
+<p style="text-align:center;">If anything ever goes wrong, email us and we'll
+help:</p>
+<p style="text-align:center;">
+  <a class="email" href="mailto:{CONTACT_EMAIL}">✉&nbsp; {CONTACT_EMAIL}</a>
+</p>
+<p style="text-align:center; color:#9a9184;">We usually reply within a day or
+two. Please don't ever send us your API keys or passwords — we'll never ask for
+them.</p>
+</div>
+"""
+
+
+def footer_html() -> str:
+    return (
+        '<div class="foot">'
+        f'<b>{APP_NAME}</b> · an educational tool, not financial advice · '
+        'trading involves risk of loss.<br>'
+        'You trade your own Alpaca account; we never hold your funds.<br>'
+        f'Questions or problems? <a href="mailto:{CONTACT_EMAIL}">{CONTACT_EMAIL}</a>'
+        '</div>')
+
+
+# ---------------------------------------------------------------------------
+# Access / one-time paywall.
+#
+# The gate is OFF until the operator configures it in Secrets, so the app is
+# never accidentally locked. Configure any of:
+#   PAYMENT_URL     = "https://…"        your one-time checkout link
+#   PRICE_LABEL     = "$29 one-time"     shown on the button
+#   ACCESS_CODES    = "ABC123,DEF456"    codes you hand out after purchase
+#   OWNER_CODE      = "…"                your own always-valid code
+#   GUMROAD_PRODUCT = "your_permalink"   auto-verify Gumroad license keys
+#   PAYWALL_ENABLED = "false"            force the gate off
+# ---------------------------------------------------------------------------
+def _access_cfg():
+    codes = [c.strip() for c in _secret("ACCESS_CODES", "").split(",") if c.strip()]
+    owner = _secret("OWNER_CODE", "").strip()
+    gumroad = _secret("GUMROAD_PRODUCT", "").strip()
+    return codes, owner, gumroad
+
+
+def access_gate_active() -> bool:
+    """The paywall only gates users once the operator has set it up."""
+    if _secret("PAYWALL_ENABLED", "true").strip().lower() in ("false", "0", "no",
+                                                              "off"):
+        return False
+    codes, owner, gumroad = _access_cfg()
+    return bool(codes or owner or gumroad)
+
+
+def _gumroad_verify(product: str, key: str) -> bool:
+    import json
+    import urllib.parse
+    import urllib.request
+    for field in ("product_permalink", "product_id"):
+        try:
+            data = urllib.parse.urlencode({
+                field: product, "license_key": key,
+                "increment_uses_count": "false"}).encode()
+            req = urllib.request.Request(
+                "https://api.gumroad.com/v2/licenses/verify", data=data)
+            with urllib.request.urlopen(req, timeout=15) as r:
+                if bool(json.loads(r.read().decode()).get("success")):
+                    return True
+        except Exception:
+            continue
+    return False
+
+
+def verify_access_code(code: str) -> bool:
+    code = (code or "").strip()
+    if not code:
+        return False
+    codes, owner, gumroad = _access_cfg()
+    if owner and code == owner:
+        return True
+    if code in codes:
+        return True
+    if gumroad and _gumroad_verify(gumroad, code):
+        return True
+    return False
+
+
+def has_access() -> bool:
+    if not access_gate_active():
+        return True
+    if ss.get("paid"):
+        return True
+    if ls_get("ACCESS_OK") == "1":
+        ss.paid = True
+        return True
+    return False
+
+
+def render_paywall() -> None:
+    """One-time-fee gate: pay link + access-code entry."""
+    price = _secret("PRICE_LABEL", "one-time").strip()
+    pay_url = _secret("PAYMENT_URL", "").strip()
+    st.markdown('<h3 class="ed" style="text-align:center; margin-top:1.5rem;">'
+                'Unlock the bot</h3>', unsafe_allow_html=True)
+    st.markdown(
+        '<p class="article" style="text-align:center; max-width:520px;">'
+        "A single one-time payment — <b>lifetime access, no subscription</b>. "
+        "After paying, you'll receive an access code. Enter it once and this "
+        "device stays unlocked for good.</p>", unsafe_allow_html=True)
+    if pay_url:
+        st.link_button(f"💳  Pay once — {price}", pay_url,
+                       use_container_width=True, type="primary")
+    else:
+        st.info("The payment link isn't set up yet. _(Operator: add `PAYMENT_URL` "
+                "and `ACCESS_CODES` in Secrets — see the README.)_")
+    st.caption("Already paid? Enter your access code:")
+    with st.form("unlock"):
+        code = st.text_input("Access code", value="",
+                             placeholder="e.g. MOMENTUM-XXXX", label_visibility="collapsed")
+        ok = st.form_submit_button("Unlock", use_container_width=True)
+    if ok:
+        if verify_access_code(code):
+            ss.paid = True
+            ls_set("ACCESS_OK", "1", "ls_ok")
+            st.success("✅ Unlocked! Now sign in with your Alpaca keys.")
+            st.rerun()
+        else:
+            st.error(f"That code didn't work. Double-check it, or email "
+                     f"{CONTACT_EMAIL} if you've paid and need help.")
+
+
+def render_signin() -> None:
+    """Alpaca key sign-in form (shown once access is granted)."""
+    st.markdown('<h3 class="ed" style="text-align:center; margin-top:1.6rem;">'
+                'Get started</h3>', unsafe_allow_html=True)
+    st.caption("Get free keys at **app.alpaca.markets → Paper Trading → API "
+               "Keys**. They stay in your browser only.")
+    with st.form("connect"):
+        alp_key = st.text_input("Alpaca API key", value="", type="password",
+                                placeholder="PK…")
+        alp_sec = st.text_input("Alpaca API secret", value="", type="password",
+                                placeholder="your secret")
+        c1, c2 = st.columns(2)
+        live = c1.checkbox("Live trading (real money)", value=False)
+        remember = c2.checkbox("Remember me", value=True)
+        agree = st.checkbox(
+            "I agree to the Terms of Service and understand this is **not "
+            "financial advice**.", value=False)
+        submitted = st.form_submit_button("Sign in", use_container_width=True,
+                                          type="primary")
+    with st.expander("📜 Terms of Service & Disclaimer"):
+        st.markdown(TERMS)
+    if submitted:
+        if not agree:
+            st.error("Please accept the Terms of Service to continue.")
+        elif not alp_key.strip() or not alp_sec.strip():
+            st.error("Enter both your Alpaca API key and secret.")
+        else:
+            with st.spinner("Checking your keys…"):
+                ok, err = _connect(alp_key, alp_sec, live)
+            if ok:
+                if remember:
+                    ls_save(alp_key.strip(), alp_sec.strip(), live)
+                st.rerun()
+            else:
+                st.error(f"❌ {err}")
+                st.info("Make sure they're **paper** keys with 'Live trading' "
+                        "unchecked (or live keys with it checked).")
 
 
 TERMS = """
@@ -164,6 +426,15 @@ def ls_get(name: str) -> str:
         return (_ls.getItem(name) or "").strip()
     except Exception:
         return ""
+
+
+def ls_set(name: str, value: str, wk: str) -> None:
+    if _ls is None:
+        return
+    try:
+        _ls.setItem(name, value, key=wk)
+    except Exception:
+        pass
 
 
 def ls_save(alp_key: str, alp_sec: str, live: bool) -> None:
@@ -235,55 +506,44 @@ if not ss.connected:
             if ok:
                 st.rerun()
 
+    # --- Which marketing page? (real links via ?nav=) ---
+    try:
+        nav = str(st.query_params.get("nav", "home")).lower()
+    except Exception:
+        nav = "home"
+    if nav not in ("home", "about", "contact"):
+        nav = "home"
+
+    # --- Masthead + centered nav (the editorial look) ---
     st.markdown(
-        f'<div class="hero"><div class="logo">📈</div>'
-        f'<div class="name">{APP_NAME}</div>'
-        f'<div class="tag">{APP_TAGLINE}</div></div>',
-        unsafe_allow_html=True)
-
-    st.markdown("#### Sign in with your Alpaca keys")
-    st.caption("Get free keys at **app.alpaca.markets → Paper Trading → API "
-               "Keys**. They stay in your browser only.")
-
-    with st.form("connect"):
-        alp_key = st.text_input("Alpaca API key", value="", type="password",
-                                placeholder="PK…")
-        alp_sec = st.text_input("Alpaca API secret", value="", type="password",
-                                placeholder="your secret")
-        c1, c2 = st.columns(2)
-        live = c1.checkbox("Live trading (real money)", value=False)
-        remember = c2.checkbox("Remember me", value=True)
-        agree = st.checkbox(
-            "I agree to the Terms of Service and understand this is **not "
-            "financial advice**.", value=False)
-        submitted = st.form_submit_button("Sign in", use_container_width=True,
-                                          type="primary")
-
-    with st.expander("📜 Terms of Service & Disclaimer"):
-        st.markdown(TERMS)
-
+        f'<div class="masthead"><div class="wordmark">{APP_NAME}</div>'
+        f'<div class="subtitle">… a calmer, more honest way to trade with AI.'
+        f'</div></div>', unsafe_allow_html=True)
+    st.markdown('<div class="rule"></div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="foot">Educational tool · not financial advice · trading '
-        'involves risk of loss.<br>You trade your own Alpaca account; we never '
-        'hold your funds.</div>', unsafe_allow_html=True)
+        '<div class="nav">'
+        f'<a class="{"on" if nav == "home" else ""}" href="?nav=home"'
+        ' target="_self">Home</a>'
+        f'<a class="{"on" if nav == "about" else ""}" href="?nav=about"'
+        ' target="_self">About</a>'
+        f'<a class="{"on" if nav == "contact" else ""}" href="?nav=contact"'
+        ' target="_self">Contact</a>'
+        '</div>', unsafe_allow_html=True)
+    st.markdown('<div class="rule"></div>', unsafe_allow_html=True)
 
-    if submitted:
-        if not agree:
-            st.error("Please accept the Terms of Service to continue.")
-        elif not alp_key.strip() or not alp_sec.strip():
-            st.error("Enter both your Alpaca API key and secret.")
+    if nav == "about":
+        st.markdown(ABOUT_HTML, unsafe_allow_html=True)
+    elif nav == "contact":
+        st.markdown(CONTACT_HTML, unsafe_allow_html=True)
+    else:
+        # HOME — intro, then either the paywall or the sign-in form.
+        st.markdown(HOME_HTML, unsafe_allow_html=True)
+        if access_gate_active() and not has_access():
+            render_paywall()
         else:
-            with st.spinner("Checking your keys…"):
-                ok, err = _connect(alp_key, alp_sec, live)
-            if ok:
-                if remember:
-                    ls_save(alp_key.strip(), alp_sec.strip(), live)
-                st.rerun()
-            else:
-                st.error(f"❌ {err}")
-                st.info("Make sure they're **paper** keys with 'Live trading' "
-                        "unchecked (or live keys with it checked).")
+            render_signin()
 
+    st.markdown(footer_html(), unsafe_allow_html=True)
     st.stop()
 
 
@@ -1185,3 +1445,6 @@ prompt = st.chat_input("Type 'find' to find a trade…")
 if prompt:
     handle_command(prompt)
     st.rerun()
+
+# --- Help / contact footer ---
+st.markdown(footer_html(), unsafe_allow_html=True)

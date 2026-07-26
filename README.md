@@ -128,6 +128,45 @@ them on that device.
 > visitor into someone else's account. Secrets are only for non-personal
 > defaults like `MAX_ORDER_DOLLARS`.
 
+### 🌐 The public site (Home · About · Contact)
+
+The signed-out screen is a small, editorial marketing site — a masthead, a
+centered **Home / About / Contact** nav (real `?nav=` links), warm copy, and a
+footer. Contact points at **zalwagayan@gmail.com**. Rename the product in one
+place: `APP_NAME` at the top of `streamlit_app.py`.
+
+### 💳 Charging a one-time fee (optional paywall)
+
+The app has a built-in **one-time-fee gate**: visitors see an "Unlock the bot"
+button (your checkout link) and an **access-code** box; only after entering a
+valid code does the Alpaca sign-in appear. The unlock is remembered in their
+browser, so they pay once.
+
+**The gate is OFF until you configure it** (so you can't accidentally lock
+yourself out). To turn it on, set these in your deployment **Secrets**:
+
+```toml
+PAYMENT_URL  = "https://your-checkout-link"   # where "Pay once" sends people
+PRICE_LABEL  = "$29 one-time"                  # shown on the button
+# Grant access with EITHER a list of codes you hand out after purchase…
+ACCESS_CODES = "CODE-ALICE,CODE-BOB"
+# …or auto-verify Gumroad license keys (buyers paste the key Gumroad emails):
+GUMROAD_PRODUCT = "your_gumroad_permalink"
+OWNER_CODE   = "let-me-in"                      # your own always-valid code
+# PAYWALL_ENABLED = "false"                     # force the gate off
+```
+
+**Easiest setup (no coding):** sell a product on **[Gumroad](https://gumroad.com)**
+or **[Lemon Squeezy](https://lemonsqueezy.com)** for a one-time price with
+"license keys" enabled. Put the product's checkout URL in `PAYMENT_URL`. For
+Gumroad, also set `GUMROAD_PRODUCT` to the product's permalink and the app will
+verify each buyer's key automatically. Prefer manual control? Skip Gumroad and
+just hand out `ACCESS_CODES` yourself as sales come in.
+
+> This is a lightweight indie gate (server-side code check), not enterprise DRM
+> — good enough for a one-time-fee product. It never touches the buyer's money;
+> the payment happens entirely on your provider's checkout page.
+
 ### 🧠 The engine is the brain (no AI key, no third-party sign-up)
 
 The **momentum + volume scanner** shortlists movers, then `engine.py` — the
