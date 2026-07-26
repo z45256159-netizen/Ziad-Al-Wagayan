@@ -86,12 +86,18 @@ Your `.env` is git-ignored, so your keys won't be committed.
 
 ## 🌐 The website (phone-friendly) — recommended
 
-The web version (`streamlit_app.py`) is a **chat** that works great on a phone.
-You **paste your Alpaca keys right in the app** (it checks they work) — that's
-the *only* thing you need, no other sign-ups — then tap the big **🔎 Find me a
-trade** button. It finds one trade, explains it, and you tap **Yes** or **No**
-to place it. Deploy it free once and you get a permanent URL you open in your
-browser; after that there's no more setup — open the link, paste keys, tap Find.
+The web version (`streamlit_app.py`) is a polished, phone-friendly app that
+**anyone can sign in to with their own Alpaca keys** — deploy it once and share
+the link. On the sign-in screen each visitor enters *their own* keys (stored
+only in their own browser via **Remember me**), accepts the **Terms of Service /
+"not financial advice"** disclaimer, and lands in the app. Nobody ever sees or
+uses anyone else's account. Then they tap the big **🔎 Find me a trade** button:
+it finds one trade, explains it, and they tap **Yes** or **No** to place it.
+
+> **Multi-user by design.** The app never reads keys from the server's Secrets,
+> so it can't leak the operator's account to visitors — every user brings their
+> own keys, kept in their own browser. If you host it for others, set only the
+> non-personal defaults (order caps, etc.) in Secrets, never `ALPACA_API_KEY`.
 
 > Why does it need hosting instead of being a plain link? Because it talks to
 > your real brokerage account. Your secret key must live on a server (never in a
@@ -109,19 +115,18 @@ browser; after that there's no more setup — open the link, paste keys, tap Fin
 5. Open the link and **paste your keys in the app** — just the Alpaca key +
    secret. The app checks them, then you're in the chat. Nothing else to set up.
 
-### Never type your keys again (recommended)
+### Never type your keys again — "Remember me"
 
-Save them **once** in your app's Secrets and the app **auto-connects** every
-visit — straight to the chat, no form:
+Tick **Remember me** when you sign in. Your keys are saved **in your own
+browser** (localStorage) and the app signs you in automatically next time — no
+Secrets, no "Manage app," nothing to configure. This works the same for every
+visitor, each with their own keys. Tap **Disconnect / change keys** to forget
+them on that device.
 
-1. On your deployed app tap **⋮ → Settings → Secrets** (or **Manage app → Secrets**).
-2. Paste this (with your real keys) and **Save**:
-   ```toml
-   ALPACA_API_KEY = "PK...your paper key..."
-   ALPACA_API_SECRET = "...your paper secret..."
-   LIVE = "false"
-   ```
-3. Reopen the app — it connects automatically and drops you in the chat.
+> Don't put `ALPACA_API_KEY` / `ALPACA_API_SECRET` in the deployment Secrets for
+> a shared app — the app intentionally ignores them so it can never sign a
+> visitor into someone else's account. Secrets are only for non-personal
+> defaults like `MAX_ORDER_DOLLARS`.
 
 ### 🧠 The engine is the brain (no AI key, no third-party sign-up)
 

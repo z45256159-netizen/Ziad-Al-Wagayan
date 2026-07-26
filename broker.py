@@ -106,6 +106,33 @@ class Broker:
         pct = (dollars / last * 100) if last else 0.0
         return round(dollars, 2), round(pct, 2)
 
+    def portfolio_pl(self):
+        """Total profit/loss over the account's available history.
+        Returns (dollars, percent, window_label) or None if unavailable."""
+        try:
+            from alpaca.trading.requests import GetPortfolioHistoryRequest
+        except Exception:  # pragma: no cover - older SDK
+            return None
+        for period, label in (("all", "all time"), ("1A", "past year"),
+                              ("1M", "past month")):
+            try:
+                h = self.trading.get_portfolio_history(
+                    GetPortfolioHistoryRequest(period=period, timeframe="1D"))
+                eq = [float(x) for x in (getattr(h, "equity", None) or [])
+                      if x is not None]
+                if not eq:
+                    continue
+                base = getattr(h, "base_value", None)
+                base = float(base) if base else eq[0]
+                if base <= 0:
+                    base = eq[0] or 1.0
+                dollars = eq[-1] - base
+                pct = (dollars / base * 100) if base else 0.0
+                return round(dollars, 2), round(pct, 2), label
+            except Exception:  # noqa: BLE001 - best effort across SDK shapes
+                continue
+        return None
+
     def close_position(self, symbol: str):
         """Flatten a single position at market (sells a long / covers a short)."""
         try:

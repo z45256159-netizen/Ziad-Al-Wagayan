@@ -27,12 +27,16 @@ from strategy import (detect_pattern, direction_of, rank_candidates,
                       rank_relaxed)
 from universe import UNIVERSE, describe
 
-st.set_page_config(page_title="Alpaca Trading Bot", page_icon="📈", layout="centered")
+APP_NAME = "Momentum"
+APP_TAGLINE = "AI-assisted trading — on your own Alpaca account"
+
+st.set_page_config(page_title=APP_NAME, page_icon="📈", layout="centered",
+                   initial_sidebar_state="collapsed")
 
 ss = st.session_state
 ss.setdefault("connected", False)
 ss.setdefault("messages", [])      # chat history: [{"role","content"}]
-ss.setdefault("pending", None)     # trade awaiting yes/no: {"c","s","ai"}
+ss.setdefault("pending", None)     # trade awaiting yes/no
 ss.setdefault("broker", None)
 ss.setdefault("cfg", None)
 ss.setdefault("recent", [])        # last few tickers suggested, for variety
@@ -40,7 +44,8 @@ ss.setdefault("view", None)        # {plan, bars} for the chart of the latest pi
 
 
 def _secret(name: str, default: str = "") -> str:
-    """Prefill from Streamlit secrets / env if available (optional)."""
+    """Read NON-PERSONAL config defaults (order caps, etc.) from env/secrets.
+    Never used for user API keys — every user brings their own."""
     try:
         if name in st.secrets:
             return str(st.secrets[name])
@@ -53,9 +58,136 @@ def say(role: str, content: str) -> None:
     ss.messages.append({"role": role, "content": content})
 
 
-# ===========================================================================
-# 1) CONNECT — auto-connect from saved Secrets, else show a one-time form
-# ===========================================================================
+# ---------------------------------------------------------------------------
+# Styling — clean, minimalist, theme-aware. Injected on every screen.
+# ---------------------------------------------------------------------------
+def inject_css() -> None:
+    st.markdown("""
+<style>
+#MainMenu, footer, [data-testid="stToolbar"] {visibility:hidden;}
+.block-container {padding-top:1.1rem; padding-bottom:5rem; max-width:720px;}
+html, body, [class*="css"] {-webkit-font-smoothing:antialiased;}
+
+/* Hero / brand */
+.hero {text-align:center; padding:26px 20px 22px; border-radius:20px;
+       background:radial-gradient(120% 140% at 50% 0%, #0e7490 0%, #0b1220 60%);
+       border:1px solid rgba(255,255,255,.08); margin-bottom:1rem;}
+.hero .logo {font-size:2.1rem;}
+.hero .name {font-size:1.7rem; font-weight:800; letter-spacing:.3px; color:#fff;
+             margin:.15rem 0 .1rem;}
+.hero .tag {color:#a9c7d6; font-size:.92rem;}
+
+/* Compact header on the app screen */
+.hdr {display:flex; align-items:center; justify-content:space-between;
+      background:linear-gradient(135deg,#0e7490,#0891b2); color:#fff;
+      padding:12px 16px; border-radius:14px; margin-bottom:.7rem;
+      box-shadow:0 6px 20px rgba(8,145,178,.22);}
+.hdr .t {font-size:1.05rem; font-weight:800; letter-spacing:.2px;}
+.pill {padding:4px 12px; border-radius:999px; font-weight:800; font-size:.68rem;
+       letter-spacing:.4px;}
+.pill.paper {background:#dcfce7; color:#166534;}
+.pill.live  {background:#fee2e2; color:#991b1b;}
+
+/* Controls */
+.stButton>button {border-radius:12px; font-weight:700; padding:.6rem 1rem;
+                  border:1px solid rgba(255,255,255,.10);}
+.stButton>button[kind="primary"] {box-shadow:0 6px 18px rgba(8,145,178,.30);}
+[data-testid="stMetric"] {background:rgba(148,163,184,.10); padding:12px 14px;
+       border-radius:14px; border:1px solid rgba(148,163,184,.14);}
+[data-testid="stExpander"] {border-radius:14px; border:1px solid rgba(148,163,184,.16);}
+[data-testid="stChatInput"] textarea {border-radius:12px;}
+.foot {text-align:center; color:#7c8b99; font-size:.74rem; margin-top:1.4rem;
+       line-height:1.5;}
+</style>
+""", unsafe_allow_html=True)
+
+
+TERMS = """
+**Terms of Service & Disclaimer** · *Last updated: 2026*
+
+**1. What this is.** This application (the "Service") is a software tool that
+helps you analyse markets and place orders **through your own brokerage account
+at Alpaca**. You connect it with your own Alpaca API keys. The Service never
+holds your money and never trades on anyone else's account.
+
+**2. Not financial advice.** The Service is provided for **educational and
+informational purposes only**. Nothing it shows — signals, "confidence" scores,
+targets, stops, backtests, or news summaries — is investment, financial, legal,
+or tax advice, or a recommendation to buy or sell any security. You are solely
+responsible for your own trading decisions.
+
+**3. Risk of loss.** Trading stocks involves substantial risk, including the
+**loss of your entire investment**. Past and simulated performance does **not**
+guarantee future results. Only trade money you can afford to lose. We strongly
+recommend using **paper (practice) mode** first.
+
+**4. No warranty.** The Service is provided "as is," without warranty of any
+kind. Market data, order routing, and calculations may be delayed, incomplete,
+or wrong. The Service may be unavailable at any time. Automated features run
+only while the page is open and can miss trades or fills.
+
+**5. Limitation of liability.** To the maximum extent permitted by law, the
+operator of the Service is not liable for any trading losses or any direct,
+indirect, incidental, or consequential damages arising from your use of it.
+
+**6. Your responsibilities.** You confirm you are legally allowed to trade, that
+the API keys you enter are your own, and that you will comply with Alpaca's
+terms and all applicable laws. Keep your keys secure.
+
+**7. Your keys & privacy.** Your API keys are stored only in **your own
+browser** (via "Remember me") so you don't have to retype them. They are used
+solely to talk to Alpaca on your behalf.
+
+By using the Service you agree to these terms. If you do not agree, do not use
+the Service.
+"""
+
+
+# --- "Remember me" via browser localStorage — one handle per run (private to
+#     each visitor's own browser). Created once so the component always renders,
+#     which is what makes it reliable. ---
+def _make_ls():
+    try:
+        from streamlit_local_storage import LocalStorage
+        return LocalStorage()
+    except Exception:
+        return None
+
+
+_ls = _make_ls()
+
+
+def ls_get(name: str) -> str:
+    if _ls is None:
+        return ""
+    try:
+        return (_ls.getItem(name) or "").strip()
+    except Exception:
+        return ""
+
+
+def ls_save(alp_key: str, alp_sec: str, live: bool) -> None:
+    if _ls is None:
+        return
+    try:
+        _ls.setItem("ALPACA_API_KEY", alp_key, key="ls_ak")
+        _ls.setItem("ALPACA_API_SECRET", alp_sec, key="ls_as")
+        _ls.setItem("LIVE", "true" if live else "false", key="ls_lv")
+    except Exception:
+        pass
+
+
+def ls_clear() -> None:
+    if _ls is None:
+        return
+    for name, wk in (("ALPACA_API_KEY", "d_ak"), ("ALPACA_API_SECRET", "d_as"),
+                     ("LIVE", "d_lv")):
+        try:
+            _ls.deleteItem(name, key=wk)
+        except Exception:
+            pass
+
+
 def _connect(alp_key, alp_sec, live):
     """Returns (ok, error_message). On success, stores everything in session."""
     try:
@@ -80,114 +212,77 @@ def _connect(alp_key, alp_sec, live):
     ss.broker, ss.cfg = broker, cfg
     ss.connected, ss.messages, ss.pending = True, [], None
     say("assistant",
-        f"✅ Connected to Alpaca ({cfg.mode_name}).\n\n"
-        f"Tap **🔎 Find me a trade** (or type **find**). You can also type "
-        f"**balance** or **positions**.")
+        f"✅ You're in ({cfg.mode_name}).\n\n"
+        f"Tap **🔎 Find me a trade** to begin. You can also type **balance** or "
+        f"**positions** anytime.")
     return True, None
 
 
-def _live_flag() -> bool:
-    return _secret("LIVE", "false").strip().lower() in ("1", "true", "yes", "on")
-
-
-# --- "Remember me on this device" via browser localStorage (best-effort) ---
-def _local_storage():
-    """Return a LocalStorage handle, or None if the component isn't available.
-    Everything here is wrapped so a failure never breaks the app."""
-    try:
-        from streamlit_local_storage import LocalStorage
-        return LocalStorage()
-    except Exception:
-        return None
-
-
-def ls_get(ls, name: str) -> str:
-    if ls is None:
-        return ""
-    try:
-        return (ls.getItem(name) or "").strip()
-    except Exception:
-        return ""
-
-
-def ls_save(ls, alp_key: str, alp_sec: str, live: bool) -> None:
-    if ls is None:
-        return
-    try:
-        ls.setItem("ALPACA_API_KEY", alp_key, key="ls_ak")
-        ls.setItem("ALPACA_API_SECRET", alp_sec, key="ls_as")
-        ls.setItem("LIVE", "true" if live else "false", key="ls_lv")
-    except Exception:
-        pass
-
-
-def ls_clear(ls) -> None:
-    if ls is None:
-        return
-    for name, wk in (("ALPACA_API_KEY", "d_ak"), ("ALPACA_API_SECRET", "d_as"),
-                     ("LIVE", "d_lv")):
-        try:
-            ls.deleteItem(name, key=wk)
-        except Exception:
-            pass
-
-
+# ===========================================================================
+# 1) SIGN-IN SCREEN (each visitor uses their OWN Alpaca keys)
+# ===========================================================================
 if not ss.connected:
-    # 1) Auto-connect from Secrets (instant, reliable) if present.
-    saved_key = _secret("ALPACA_API_KEY").strip()
-    saved_sec = _secret("ALPACA_API_SECRET").strip()
-    if saved_key and saved_sec and not ss.get("auto_tried"):
-        ss.auto_tried = True
-        with st.spinner("Connecting…"):
-            ok, _err = _connect(saved_key, saved_sec, _live_flag())
-        if ok:
-            st.rerun()
+    inject_css()
 
-    # 2) Otherwise auto-connect from this device's saved keys (Remember me).
-    # One LocalStorage handle per run (its constructor uses a fixed widget key).
-    _ls = _local_storage()
-    if not ss.connected and not ss.get("ls_tried"):
-        rk, rs = ls_get(_ls, "ALPACA_API_KEY"), ls_get(_ls, "ALPACA_API_SECRET")
-        # Only mark "tried" once the browser has actually returned the keys —
-        # on the first render storage may still be loading.
+    # Auto sign-in from THIS browser's saved keys (Remember me). No owner keys,
+    # no shared account — the keys live only in the visitor's own browser.
+    if not ss.get("ls_tried"):
+        rk, rs = ls_get("ALPACA_API_KEY"), ls_get("ALPACA_API_SECRET")
         if rk and rs:
             ss.ls_tried = True
-            with st.spinner("Connecting…"):
-                ok, _err = _connect(rk, rs, ls_get(_ls, "LIVE") == "true")
+            with st.spinner("Signing you in…"):
+                ok, _err = _connect(rk, rs, ls_get("LIVE") == "true")
             if ok:
                 st.rerun()
 
-if not ss.connected:
-    st.title("📈 Alpaca Trading Bot")
-    st.caption("Enter your keys once. Tick **Remember me** and this device won't "
-               "ask again.")
+    st.markdown(
+        f'<div class="hero"><div class="logo">📈</div>'
+        f'<div class="name">{APP_NAME}</div>'
+        f'<div class="tag">{APP_TAGLINE}</div></div>',
+        unsafe_allow_html=True)
+
+    st.markdown("#### Sign in with your Alpaca keys")
+    st.caption("Get free keys at **app.alpaca.markets → Paper Trading → API "
+               "Keys**. They stay in your browser only.")
 
     with st.form("connect"):
-        st.markdown("**Alpaca keys** (from app.alpaca.markets → Paper Trading)")
-        alp_key = st.text_input("Alpaca API key", value=_secret("ALPACA_API_KEY"),
-                                type="password")
-        alp_sec = st.text_input("Alpaca API secret", value=_secret("ALPACA_API_SECRET"),
-                                type="password")
-        live = st.checkbox("⚠️ Live trading (REAL money)", value=_live_flag())
-        remember = st.checkbox("💾 Remember me on this device", value=True)
-        submitted = st.form_submit_button("Connect", use_container_width=True,
+        alp_key = st.text_input("Alpaca API key", value="", type="password",
+                                placeholder="PK…")
+        alp_sec = st.text_input("Alpaca API secret", value="", type="password",
+                                placeholder="your secret")
+        c1, c2 = st.columns(2)
+        live = c1.checkbox("Live trading (real money)", value=False)
+        remember = c2.checkbox("Remember me", value=True)
+        agree = st.checkbox(
+            "I agree to the Terms of Service and understand this is **not "
+            "financial advice**.", value=False)
+        submitted = st.form_submit_button("Sign in", use_container_width=True,
                                           type="primary")
 
-    st.caption("That's all you need — no other keys, no sign-ups. The trade "
-               "engine is built in.")
+    with st.expander("📜 Terms of Service & Disclaimer"):
+        st.markdown(TERMS)
+
+    st.markdown(
+        '<div class="foot">Educational tool · not financial advice · trading '
+        'involves risk of loss.<br>You trade your own Alpaca account; we never '
+        'hold your funds.</div>', unsafe_allow_html=True)
 
     if submitted:
-        with st.spinner("Checking your keys…"):
-            ok, err = _connect(alp_key, alp_sec, live)
-        if ok:
-            if remember:
-                # Reuse the same handle created above (don't build a second one).
-                ls_save(_ls, alp_key.strip(), alp_sec.strip(), live)
-            st.rerun()
+        if not agree:
+            st.error("Please accept the Terms of Service to continue.")
+        elif not alp_key.strip() or not alp_sec.strip():
+            st.error("Enter both your Alpaca API key and secret.")
         else:
-            st.error(f"❌ {err}")
-            st.info("Make sure they're **paper** keys and 'Live trading' is "
-                    "unchecked (or use live keys with it checked).")
+            with st.spinner("Checking your keys…"):
+                ok, err = _connect(alp_key, alp_sec, live)
+            if ok:
+                if remember:
+                    ls_save(alp_key.strip(), alp_sec.strip(), live)
+                st.rerun()
+            else:
+                st.error(f"❌ {err}")
+                st.info("Make sure they're **paper** keys with 'Live trading' "
+                        "unchecked (or live keys with it checked).")
 
     st.stop()
 
@@ -750,30 +845,13 @@ ss.setdefault("protect_winners", False)
 ss.setdefault("be_trigger_pct", 1.5)    # move stop to breakeven once up this %
 ss.setdefault("trail_pct", 4.0)         # then trail the stop this far behind price
 
-# --- A little CSS polish (theme-aware) ---
-st.markdown("""
-<style>
-#MainMenu, footer, [data-testid="stToolbar"] {visibility:hidden;}
-.block-container {padding-top:1.2rem; max-width:760px;}
-.hdr {display:flex; align-items:center; justify-content:space-between;
-      background:linear-gradient(135deg,#0f766e,#0891b2);
-      color:#fff; padding:14px 18px; border-radius:16px; margin-bottom:.6rem;
-      box-shadow:0 4px 16px rgba(8,145,178,.25);}
-.hdr .t {font-size:1.15rem; font-weight:800; letter-spacing:.2px;}
-.pill {padding:4px 13px; border-radius:999px; font-weight:800; font-size:.72rem;
-       letter-spacing:.4px;}
-.pill.paper {background:#dcfce7; color:#166534;}
-.pill.live  {background:#fee2e2; color:#991b1b;}
-.stButton>button {border-radius:12px; font-weight:700; padding:.55rem 1rem;}
-[data-testid="stMetric"] {background:rgba(128,128,128,.08); padding:10px 12px;
-       border-radius:12px;}
-</style>
-""", unsafe_allow_html=True)
+# --- Styling (same minimalist system as the sign-in screen) ---
+inject_css()
 
 # --- Header ---
 mode_cls = "live" if cfg.live else "paper"
 st.markdown(
-    f'<div class="hdr"><span class="t">📈 Alpaca Trading Bot</span>'
+    f'<div class="hdr"><span class="t">📈 {APP_NAME}</span>'
     f'<span class="pill {mode_cls}">{cfg.mode_name}</span></div>',
     unsafe_allow_html=True,
 )
@@ -882,11 +960,10 @@ with st.expander("⚙️ Trading settings"):
 
     st.markdown("---")
     if st.button("Disconnect / change keys", use_container_width=True):
-        ls_clear(_local_storage())   # forget saved keys on this device
+        ls_clear()   # forget saved keys on this device
         for k in ("connected", "broker", "cfg", "pending"):
             ss[k] = False if k == "connected" else None
         ss.messages = []
-        ss.auto_tried = False
         ss.ls_tried = False
         st.rerun()
 
@@ -908,9 +985,20 @@ with st.expander("📈 How am I doing? (my real trades)"):
     try:
         acct = broker.get_account()
         dpl, dpct = broker.today_pl()
-        cc = st.columns(2)
-        cc[0].metric("Today's P/L", f"${dpl:,.2f}", f"{dpct:+.2f}%")
-        cc[1].metric("Portfolio value", f"${float(acct.portfolio_value):,.0f}")
+        cc = st.columns(3)
+        cc[0].metric("Portfolio value", f"${float(acct.portfolio_value):,.0f}")
+        cc[1].metric("Today's P/L", f"${dpl:,.2f}", f"{dpct:+.2f}%")
+        total = broker.portfolio_pl()
+        if total is not None:
+            tdol, tpct, twin = total
+            cc[2].metric(f"Total P/L ({twin})", f"${tdol:,.2f}", f"{tpct:+.2f}%")
+            unit = "gained" if tdol >= 0 else "lost"
+            st.caption(f"📊 Overall you've **{unit} ${abs(tdol):,.2f}** "
+                       f"({tpct:+.2f}%) {twin}. Buying power "
+                       f"${float(acct.buying_power):,.0f} · cash "
+                       f"${float(acct.cash):,.0f}.")
+        else:
+            cc[2].metric("Buying power", f"${float(acct.buying_power):,.0f}")
     except BrokerError:
         st.caption("Couldn't read your account right now.")
 
