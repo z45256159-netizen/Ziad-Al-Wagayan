@@ -300,6 +300,157 @@ def _confidence(direction: str, regime: Regime, rr: float,
     return (max(0, min(100, int(score))), reasons)
 
 
+# ============================================================ Supertrend
+# The Supertrend indicator: an ATR-band trend-follower that flips between
+# "buy" (uptrend) and "sell" (downtrend). The Supertrend line itself doubles
+# as a natural trailing stop, which fits the bot's bracket orders perfectly.
+SUPERTREND_SYMBOLS = ["NVDA", "MSFT", "META", "SPY"]
+
+
+def supertrend(bars: List[Bar], period: int = 10, mult: float = 3.0):
+    """Return (direction, flipped, line) or None.
+      direction : 'long' if the trend is up, else 'short'
+      flipped   : True if the trend flipped on the latest bar (a fresh signal)
+      line      : the Supertrend line value (use as the protective stop)
+    """
+    n = len(bars)
+    if n < period + 2:
+        return None
+    highs = [_hi(b) for b in bars]
+    lows = [_lo(b) for b in bars]
+    closes = [b.close for b in bars]
+
+    # Wilder-smoothed ATR series.
+    trs = [highs[0] - lows[0]]
+    for i in range(1, n):
+        trs.append(max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]),
+                       abs(lows[i] - closes[i - 1])))
+    atr_s = [0.0] * n
+    atr_s[period - 1] = sum(trs[:period]) / period
+    for i in range(period, n):
+        atr_s[i] = (atr_s[i - 1] * (period - 1) + trs[i]) / period
+
+    fu = [0.0] * n   # final upper band
+    fl = [0.0] * n   # final lower band
+    dirn = [1] * n   # 1 = up, -1 = down
+    line = [0.0] * n
+    for i in range(period - 1, n):
+        hl2 = (highs[i] + lows[i]) / 2.0
+        bu = hl2 + mult * atr_s[i]
+        bl = hl2 - mult * atr_s[i]
+        if i == period - 1:
+            fu[i], fl[i], dirn[i], line[i] = bu, bl, 1, bl
+            continue
+        fu[i] = bu if (bu < fu[i - 1] or closes[i - 1] > fu[i - 1]) else fu[i - 1]
+        fl[i] = bl if (bl > fl[i - 1] or closes[i - 1] < fl[i - 1]) else fl[i - 1]
+        if closes[i] > fu[i - 1]:
+            dirn[i] = 1
+        elif closes[i] < fl[i - 1]:
+            dirn[i] = -1
+        else:
+            dirn[i] = dirn[i - 1]
+        line[i] = fl[i] if dirn[i] == 1 else fu[i]
+
+    direction = "long" if dirn[-1] == 1 else "short"
+    flipped = dirn[-1] != dirn[-2]
+    return direction, flipped, round(line[-1], 2)
+
+
+def build_supertrend_setup(symbol: str, bars: List[Bar], buying_power: float,
+                           risk_pct: float, max_order_dollars: float,
+                           allowed=None, news_score: int = 0,
+                           min_rr: float = 1.2, target_rr: float = 2.0) -> Setup:
+    """A trade that follows ONLY the Supertrend signal, using the Supertrend
+    line as the stop and a reward:risk target. News nudges the confidence."""
+    st = supertrend(bars)
+    if st is None:
+        return _reject(symbol, "not enough history for Supertrend")
+    direction, flipped, line = st
+    if allowed is not None and not allowed(direction):
+        return _reject(symbol, f"Supertrend says {direction}, blocked by your "
+                               "direction setting")
+
+    regime = detect_regime(bars)
+    entry = round(bars[-1].close, 2)
+    if entry <= 0:
+        return _reject(symbol, "invalid price", regime.label)
+
+    # The Supertrend line is the stop. Guard the geometry, then clamp distance.
+    if direction == "long":
+        if not line < entry:
+            return _reject(symbol, "Supertrend line not below price", regime.label)
+        dist = min(max(entry - line, entry * MIN_STOP_PCT), entry * MAX_STOP_PCT)
+        stop = round(entry - dist, 2)
+        target = round(entry + target_rr * dist, 2)
+    else:
+        if not line > entry:
+            return _reject(symbol, "Supertrend line not above price", regime.label)
+        dist = min(max(line - entry, entry * MIN_STOP_PCT), entry * MAX_STOP_PCT)
+        stop = round(entry + dist, 2)
+        target = round(entry - target_rr * dist, 2)
+
+    risk_per_share = abs(entry - stop)
+    if risk_per_share <= 0:
+        return _reject(symbol, "invalid stop", regime.label)
+    rr = round(abs(target - entry) / risk_per_share, 2)
+
+    if direction == "long" and not (stop < entry < target):
+        return _reject(symbol, "geometry invalid for a long", regime.label)
+    if direction == "short" and not (target < entry < stop):
+        return _reject(symbol, "geometry invalid for a short", regime.label)
+    if rr < min_rr:
+        return _reject(symbol, f"reward:risk only 1:{rr:g}", regime.label)
+
+    risk_budget = risk_pct * buying_power
+    qty = int(min(risk_budget / risk_per_share, max_order_dollars / entry,
+                  buying_power / entry))
+    if qty < 1:
+        if entry <= min(max_order_dollars, buying_power):
+            qty = 1
+        else:
+            return _reject(symbol, f"one share (${entry:,.2f}) exceeds limits",
+                           regime.label)
+
+    # Confidence: Supertrend direction + freshness + trend strength + news.
+    score = 55
+    reasons = [f"📈 Supertrend is **{'BUY (up)' if direction == 'long' else 'SELL (down)'}**"]
+    if flipped:
+        score += 15
+        reasons.append("✅ fresh signal — the trend just flipped today")
+    else:
+        reasons.append("• riding an existing Supertrend (no fresh flip today)")
+    if regime.is_trending:
+        score += 10
+        reasons.append(f"✅ strong trend (ADX {regime.adx})")
+    elif regime.trend == "ranging":
+        score -= 10
+        reasons.append(f"⚠️ choppy market (ADX {regime.adx}) — Supertrend whipsaws here")
+    if news_score > 0 and direction == "long":
+        score += 10
+        reasons.append("✅ recent news leans positive — agrees with the buy")
+    elif news_score < 0 and direction == "short":
+        score += 10
+        reasons.append("✅ recent news leans negative — agrees with the short")
+    elif news_score > 0 and direction == "short":
+        score -= 12
+        reasons.append("⚠️ news leans positive but Supertrend says short — conflict")
+    elif news_score < 0 and direction == "long":
+        score -= 12
+        reasons.append("⚠️ news leans negative but Supertrend says buy — conflict")
+    confidence = max(0, min(100, int(score)))
+
+    return Setup(
+        symbol=symbol, direction=direction,
+        side=("buy" if direction == "long" else "sell"),
+        entry=entry, stop=stop, target=target, qty=qty,
+        risk_per_share=round(risk_per_share, 2),
+        risk_total=round(qty * risk_per_share, 2),
+        reward_total=round(qty * abs(target - entry), 2), rr=rr,
+        stop_pct=round(abs(stop - entry) / entry * 100, 2),
+        tp_pct=round(abs(target - entry) / entry * 100, 2),
+        confidence=confidence, reasons=reasons, regime=regime.label)
+
+
 def build_setup(symbol: str, bars: List[Bar], direction: str,
                 buying_power: float, risk_pct: float, max_order_dollars: float,
                 vol_ratio: float = 1.0, news_score: int = 0,

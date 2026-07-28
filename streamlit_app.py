@@ -21,7 +21,8 @@ from analysis import explain_setup, invest_analysis, news_sentiment
 from broker import Broker, BrokerError
 from chart import make_position_chart, tradingview_url
 from config import Config, ConfigError
-from engine import MIN_RR, build_setup
+from engine import (MIN_RR, SUPERTREND_SYMBOLS, build_setup,
+                    build_supertrend_setup)
 from sizing import TradePlan
 from strategy import (detect_pattern, direction_of, rank_candidates,
                       rank_relaxed)
@@ -632,10 +633,105 @@ def build_trade(allow_fallback=True):
     def allowed(d: str) -> bool:
         return d in ("long", "short") if forced is None else d == forced
 
+    if ss.scan_mode == "Supertrend (NVDA/MSFT/META/SPY)":
+        return _build_supertrend(bars, held, buying_power, market_open, allowed)
     if ss.scan_mode == "Best performers":
         return _build_investing(bars, tradeable, buying_power, market_open)
     return _build_technical(bars, tradeable, buying_power, market_open,
                             forced, allowed, allow_fallback)
+
+
+# ---------------------------------------------------------------------------
+# SUPERTREND  →  follow the Supertrend signal on NVDA / MSFT / META / SPY only,
+# with news factored in.
+# ---------------------------------------------------------------------------
+def _build_supertrend(bars, held, buying_power, market_open, allowed):
+    valid = []  # (symbol, setup)
+    checked = []
+    for sym in SUPERTREND_SYMBOLS:
+        if sym in held or sym not in bars:
+            continue
+        s = build_supertrend_setup(sym, bars[sym], buying_power, ss.risk_pct,
+                                   ss.max_order, allowed=allowed, news_score=0)
+        checked.append(sym)
+        if s.ok:
+            valid.append((sym, s))
+
+    if not valid:
+        held_note = ""
+        held_hits = [s for s in SUPERTREND_SYMBOLS if s in held]
+        if held_hits:
+            held_note = (f" (already holding {', '.join(held_hits)}, so those are "
+                         "skipped)")
+        return (f"🚦 **No Supertrend trade right now** on NVDA / MSFT / META / "
+                f"SPY{held_note}. Either the signal doesn't line up with your "
+                f"direction setting, or the reward-to-risk isn't there yet. "
+                f"Check again later."), None
+
+    # Prefer a fresh flip, then higher confidence.
+    def freshness(item):
+        s = item[1]
+        fresh = any("fresh signal" in r for r in s.reasons)
+        return (1 if fresh else 0, s.confidence)
+    valid.sort(key=freshness, reverse=True)
+    sym, setup = valid[0]
+    ss.recent = ([sym] + ss.recent)[:3]
+    chart_bars = bars[sym][-40:]
+
+    # News for the winner → rebuild folding sentiment into the confidence.
+    news = broker.get_news(sym)
+    sent_label, sent_emoji, _ = news_sentiment(news)
+    ns = 1 if sent_label == "BULLISH" else -1 if sent_label == "BEARISH" else 0
+    rebuilt = build_supertrend_setup(sym, bars[sym], buying_power, ss.risk_pct,
+                                     ss.max_order, allowed=allowed, news_score=ns)
+    if rebuilt.ok:
+        setup = rebuilt
+
+    plan = _setup_to_plan(setup)
+
+    parts = [f"### 🚦 {sym} — Supertrend {('BUY' if setup.direction == 'long' else 'SELL')}"
+             f" @ ${plan.entry:,.2f}"]
+    parts.append(f"**What it is:** {describe(sym)}")
+    conf_blocks = "█" * (setup.confidence // 10) + "░" * (10 - setup.confidence // 10)
+    parts.append(f"**Confidence: {setup.confidence}/100**  `{conf_blocks}`  ·  "
+                 f"market {setup.regime}")
+    if setup.reasons:
+        parts.append("**Why:**\n" + "\n".join(f"- {r}" for r in setup.reasons))
+    parts.append(f"**News:** {sent_emoji} {sent_label.title()}")
+    if news:
+        parts.append("**📰 Recent headlines:**\n" +
+                     "\n".join(f"- {h}" + (f" ({s})" if s else "")
+                               for h, s in news[:3]))
+    else:
+        parts.append("_No recent news found for this ticker._")
+    if market_open is False:
+        parts.append("_Market is closed — the order will queue until it opens._")
+
+    if plan.direction == "short":
+        action = f"🔻 **SHORT-SELL {plan.qty} share(s)**"
+        dir_note = "_Short = you profit if the price **falls**._"
+        stop_side, tp_side = "above", "below"
+    else:
+        action = f"🟢 **BUY {plan.qty} share(s)**"
+        dir_note = "_Long = you profit if the price **rises**._"
+        stop_side, tp_side = "below", "above"
+    parts.append(
+        "**📋 Trade plan**\n"
+        f"- {action} of {plan.symbol} at ~${plan.entry:,.2f}  {dir_note}\n"
+        f"- 💵 Cost: **${plan.cost:,.2f}**\n"
+        f"- 🛑 Stop-loss: **${plan.stop:,.2f}** ({stop_side} entry, {plan.stop_pct:.1f}%) "
+        f"— the Supertrend line → risk **${plan.risk_total:,.2f}**\n"
+        f"- 🎯 Take-profit: **${plan.take_profit:,.2f}** ({tp_side} entry, "
+        f"{plan.tp_pct:.1f}%) → profit **${plan.reward_total:,.2f}**\n"
+        f"- ⚖️ Risk/reward: **1 : {plan.rr_ratio:g}**")
+    parts.append(
+        f"📈 **[Open {plan.symbol} on TradingView]({tradingview_url(plan.symbol)})**")
+    parts.append("Place it? Tap **✅ Yes** or **❌ No** (entry + stop-loss + "
+                 "take-profit, placed as one bracket).")
+
+    ss.view = {"plan": plan, "bars": chart_bars,
+               "support": None, "resistance": None, "marks": []}
+    return "\n\n".join(parts), {"plan": plan, "below_bar": False}
 
 
 # ---------------------------------------------------------------------------
@@ -1150,13 +1246,15 @@ except BrokerError:
 
 # --- Settings + disconnect ---
 with st.expander("⚙️ Trading settings"):
+    _modes = ["Technical patterns", "Best performers",
+              "Supertrend (NVDA/MSFT/META/SPY)"]
     ss.scan_mode = st.radio(
         "How to find trades",
-        ["Technical patterns", "Best performers"],
-        index=["Technical patterns", "Best performers"].index(ss.scan_mode),
-        help="Technical patterns = find chart setups (head & shoulders, double "
-             "bottom, breakout…). Best performers = just take the strongest "
-             "movers.")
+        _modes,
+        index=_modes.index(ss.scan_mode) if ss.scan_mode in _modes else 0,
+        help="Technical patterns = chart setups. Best performers = strongest "
+             "movers (long-term). Supertrend = follow ONLY the Supertrend "
+             "buy/sell signal on NVDA, MSFT, META & SPY, with news factored in.")
     ss.direction_mode = st.radio(
         "Trade direction",
         ["Both", "Long only", "Short only"],
@@ -1248,8 +1346,11 @@ with st.expander("⚙️ Trading settings"):
         st.rerun()
 
 # Current-mode badge so you always know what 'find' will do.
-_mode_icon = "📈 Investing (best performers)" if ss.scan_mode == "Best performers" \
-    else "📐 Technical (patterns)"
+_mode_icon = ("🚦 Supertrend (NVDA/MSFT/META/SPY)"
+              if ss.scan_mode.startswith("Supertrend")
+              else "📈 Investing (best performers)"
+              if ss.scan_mode == "Best performers"
+              else "📐 Technical (patterns)")
 _dir_icon = {"Both": "↔ Long & Short", "Long only": "🟢 Long only",
              "Short only": "🔻 Short only"}.get(ss.direction_mode, ss.direction_mode)
 st.caption(f"🔎 Mode: **{_mode_icon}**  ·  {_dir_icon}  "

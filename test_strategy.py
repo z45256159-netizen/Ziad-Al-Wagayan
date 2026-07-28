@@ -125,6 +125,33 @@ class TestEngine(unittest.TestCase):
         self.assertFalse(s.ok)
         self.assertTrue(s.rejected)
 
+    def test_supertrend_uptrend_is_long(self):
+        from engine import supertrend
+        res = supertrend(self._uptrend_bars(n=80))
+        self.assertIsNotNone(res)
+        direction, flipped, line = res
+        self.assertEqual(direction, "long")          # rising series → uptrend
+        self.assertLess(line, 200)                    # line sits below price
+        self.assertIn(flipped, (True, False))
+
+    def test_supertrend_setup_geometry_and_stop_is_line(self):
+        from engine import build_supertrend_setup, supertrend
+        bars = self._uptrend_bars(n=80)
+        s = build_supertrend_setup("UP", bars, 100_000, 0.01, 5000)
+        if s.ok:
+            self.assertEqual(s.side, "buy")
+            self.assertLess(s.stop, s.entry)          # long stop below entry
+            self.assertLess(s.entry, s.target)        # target above
+            self.assertGreater(s.qty, 0)
+
+    def test_supertrend_respects_direction_block(self):
+        from engine import build_supertrend_setup
+        bars = self._uptrend_bars(n=80)               # a LONG signal
+        s = build_supertrend_setup("UP", bars, 100_000, 0.01, 5000,
+                                   allowed=lambda d: d == "short")  # only shorts
+        self.assertFalse(s.ok)                         # long blocked → rejected
+        self.assertTrue(s.rejected)
+
 
 class TestBacktest(unittest.TestCase):
     def test_backtest_runs_and_reports(self):
