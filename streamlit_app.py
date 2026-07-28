@@ -373,8 +373,13 @@ def render_signin() -> None:
             with st.spinner("Checking your keys…"):
                 ok, err = _connect(alp_key, alp_sec, live)
             if ok:
+                # Defer the browser-save to the NEXT screen. Writing to
+                # localStorage and immediately st.rerun() races the reload and
+                # the write is lost — that's why "Remember me" failed before.
+                # We stash the creds and the fully-rendered app screen saves them.
                 if remember:
-                    ls_save(alp_key.strip(), alp_sec.strip(), live)
+                    ss["_save_creds"] = {"k": alp_key.strip(),
+                                         "s": alp_sec.strip(), "live": live}
                 st.rerun()
             else:
                 st.error(f"❌ {err}")
@@ -573,6 +578,14 @@ if not ss.connected:
 # ===========================================================================
 broker: Broker = ss.broker
 cfg: Config = ss.cfg
+
+# Reliable "Remember me": save the keys to the browser HERE, on the fully-
+# rendered app screen, where the localStorage write actually completes (the
+# sign-in screen reloaded too fast for the write to finish).
+if ss.get("_save_creds"):
+    _c = ss["_save_creds"]
+    ls_save(_c["k"], _c["s"], _c["live"])
+    ss["_save_creds"] = None
 
 
 def _setup_to_plan(setup) -> TradePlan:
