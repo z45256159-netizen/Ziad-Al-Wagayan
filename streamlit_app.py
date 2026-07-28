@@ -281,6 +281,23 @@ def verify_access_code(code: str) -> bool:
     return False
 
 
+def auto_unlock_from_url() -> None:
+    """Grant access automatically when arriving via a link that carries a valid
+    code, e.g. https://your-app/?key=MOMENTUM2026 — so after paying, a buyer
+    just taps the link in Gumroad and lands unlocked, no typing."""
+    if ss.get("paid"):
+        return
+    try:
+        params = st.query_params
+        code = (params.get("key") or params.get("code") or params.get("unlock")
+                or "")
+    except Exception:
+        code = ""
+    if code and verify_access_code(str(code)):
+        ss.paid = True
+        ls_set("ACCESS_OK", "1", "ls_ok")
+
+
 def has_access() -> bool:
     if not access_gate_active():
         return True
@@ -494,6 +511,9 @@ def _connect(alp_key, alp_sec, live):
 # ===========================================================================
 if not ss.connected:
     inject_css()
+
+    # Auto-unlock if they arrived from the "pay → open" link (?key=CODE).
+    auto_unlock_from_url()
 
     # Auto sign-in from THIS browser's saved keys (Remember me). No owner keys,
     # no shared account — the keys live only in the visitor's own browser.
