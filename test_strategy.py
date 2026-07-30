@@ -153,6 +153,46 @@ class TestEngine(unittest.TestCase):
         self.assertTrue(s.rejected)
 
 
+class TestTradeHistory(unittest.TestCase):
+    def test_fifo_long_win_and_loss(self):
+        from broker import fifo_realized
+        fills = [
+            {"symbol": "AAPL", "side": "buy", "qty": 10, "price": 100, "when": "1"},
+            {"symbol": "AAPL", "side": "sell", "qty": 10, "price": 110, "when": "2"},
+            {"symbol": "TSLA", "side": "buy", "qty": 5, "price": 200, "when": "3"},
+            {"symbol": "TSLA", "side": "sell", "qty": 5, "price": 180, "when": "4"},
+        ]
+        trades, total = fifo_realized(fills)
+        self.assertEqual(len(trades), 2)
+        pls = {t["symbol"]: t["pl"] for t in trades}
+        self.assertAlmostEqual(pls["AAPL"], 100.0)    # (110-100)*10
+        self.assertAlmostEqual(pls["TSLA"], -100.0)   # (180-200)*5
+        self.assertAlmostEqual(total, 0.0)
+
+    def test_fifo_short_trade(self):
+        from broker import fifo_realized
+        fills = [
+            {"symbol": "NVDA", "side": "sell", "qty": 4, "price": 120, "when": "1"},
+            {"symbol": "NVDA", "side": "buy", "qty": 4, "price": 100, "when": "2"},
+        ]
+        trades, total = fifo_realized(fills)
+        self.assertEqual(len(trades), 1)
+        self.assertEqual(trades[0]["direction"], "short")
+        self.assertAlmostEqual(trades[0]["pl"], 80.0)   # (120-100)*4
+        self.assertAlmostEqual(total, 80.0)
+
+    def test_fifo_partial_and_open_leftover(self):
+        from broker import fifo_realized
+        fills = [
+            {"symbol": "MSFT", "side": "buy", "qty": 10, "price": 300, "when": "1"},
+            {"symbol": "MSFT", "side": "sell", "qty": 4, "price": 310, "when": "2"},
+        ]
+        trades, total = fifo_realized(fills)
+        self.assertEqual(len(trades), 1)             # only the closed 4 shares
+        self.assertAlmostEqual(trades[0]["qty"], 4)
+        self.assertAlmostEqual(total, 40.0)          # (310-300)*4; 6 still open
+
+
 class TestBacktest(unittest.TestCase):
     def test_backtest_runs_and_reports(self):
         from backtest import backtest

@@ -1202,9 +1202,31 @@ def handle_command(text: str) -> None:
                 f"- **{p.symbol}** ×{float(p.qty):g} · now ${float(p.current_price):,.2f} "
                 f"· P/L ${float(p.unrealized_pl):,.2f}" for p in ps)
             say("assistant", "📊 Your positions:\n" + rows)
+    elif "history" in t or "result" in t or "my trades" in t or "p&l" in t \
+            or "pnl" in t or "record" in t:
+        try:
+            hist, total = broker.trade_history()
+        except BrokerError as exc:
+            say("assistant", f"⚠️ {exc}")
+            return
+        if not hist:
+            say("assistant", "Sorry — I didn't find any closed trades on this "
+                             "account yet. Once a trade closes, it'll show here "
+                             "with its win/loss and P&L.")
+        else:
+            wins = sum(1 for x in hist if x["pl"] >= 0)
+            rows = "\n".join(
+                f"- {'🟢' if x['pl'] >= 0 else '🔴'} **{x['symbol']}** {x['direction']} "
+                f"×{x['qty']:g} · ${x['entry']:,.2f} → ${x['exit']:,.2f} · "
+                f"P&L **${x['pl']:,.2f}**" for x in hist[:20])
+            more = f"\n\n…and {len(hist) - 20} more." if len(hist) > 20 else ""
+            say("assistant",
+                f"📜 **Your closed trades** — realized P&L **${total:,.2f}**, "
+                f"{wins}/{len(hist)} winners ({wins / len(hist) * 100:.0f}% win "
+                f"rate):\n{rows}{more}")
     else:
-        say("assistant", "Type **find** to find a trade, or **balance** / "
-                         "**positions**.")
+        say("assistant", "Type **find** for a trade, or **balance** / "
+                         "**positions** / **history**.")
 
 
 # ===========================================================================
@@ -1430,6 +1452,28 @@ with st.expander("📈 How am I doing? (my real trades)"):
     if _tl:
         st.caption(f"**Placed this session:** {len(_tl)} — " +
                    ", ".join(f"{t['symbol']} ({t['side']})" for t in _tl[-8:]))
+
+    # --- Real closed-trade history: every trade, win or loss, with P&L ---
+    st.markdown("**📜 Closed trades (win / loss + P&L)**")
+    try:
+        _hist, _total = broker.trade_history()
+    except BrokerError:
+        _hist, _total = [], 0.0
+    if _hist:
+        _wins = sum(1 for t in _hist if t["pl"] >= 0)
+        st.caption(f"Realized P&L: **${_total:,.2f}**  ·  {_wins}/{len(_hist)} "
+                   f"winners ({_wins / len(_hist) * 100:.0f}% win rate)")
+        for t in _hist[:25]:
+            emo = "🟢" if t["pl"] >= 0 else "🔴"
+            st.markdown(
+                f"{emo} **{t['symbol']}** {t['direction']} ×{t['qty']:g} · "
+                f"${t['entry']:,.2f} → ${t['exit']:,.2f} · "
+                f"P&L **${t['pl']:,.2f}**")
+        if len(_hist) > 25:
+            st.caption(f"…and {len(_hist) - 25} more.")
+    else:
+        st.caption("Sorry — no closed trades found yet. Once trades close, "
+                   "they'll show here with each win/loss and total P&L.")
 
     if st.button("🛡️ Protect my winners now", use_container_width=True):
         _notes = manage_exits()

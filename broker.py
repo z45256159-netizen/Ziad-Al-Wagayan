@@ -44,6 +44,45 @@ class BrokerError(Exception):
     """Friendly, caller-facing error for anything that goes wrong with Alpaca."""
 
 
+def fifo_realized(fills: List[dict]):
+    """Pure P&L engine (no network) — pairs buys and sells FIFO to produce
+    realized closed trades. `fills` = chronological list of
+    {symbol, side ('buy'/'sell'), qty, price, when}.
+    Returns (closed_trades, total_pl). Each closed trade is a dict:
+    {symbol, direction, qty, entry, exit, pl, when}."""
+    from collections import defaultdict, deque
+    open_lots = defaultdict(deque)   # symbol -> deque of [signed_qty, price]
+    trades = []
+    for f in fills:
+        sym, side = f["symbol"], f["side"]
+        q, p = float(f["qty"]), float(f["price"])
+        dq = open_lots[sym]
+        # Close opposite-side lots first (a sell closes longs; a buy closes shorts).
+        while dq and q > 1e-9 and ((dq[0][0] > 0 and side == "sell")
+                                   or (dq[0][0] < 0 and side == "buy")):
+            lot = dq[0]
+            lot_qty, lot_price = abs(lot[0]), lot[1]
+            match = min(lot_qty, q)
+            if lot[0] > 0:   # long closed by a sell
+                pl = (p - lot_price) * match
+                direction = "long"
+            else:            # short closed by a buy
+                pl = (lot_price - p) * match
+                direction = "short"
+            trades.append({"symbol": sym, "direction": direction, "qty": match,
+                           "entry": round(lot_price, 2), "exit": round(p, 2),
+                           "pl": round(pl, 2), "when": f.get("when")})
+            if lot_qty > match + 1e-9:
+                lot[0] = lot[0] - match if lot[0] > 0 else lot[0] + match
+            else:
+                dq.popleft()
+            q -= match
+        if q > 1e-9:   # leftover opens a new lot in this fill's direction
+            dq.append([q if side == "buy" else -q, p])
+    total = round(sum(t["pl"] for t in trades), 2)
+    return trades, total
+
+
 class Broker:
     def __init__(self, config: Config) -> None:
         self.config = config
@@ -132,6 +171,36 @@ class Broker:
             except Exception:  # noqa: BLE001 - best effort across SDK shapes
                 continue
         return None
+
+    def trade_history(self, limit: int = 200):
+        """Real closed trades with realized P&L, from this account's filled
+        orders (FIFO-paired). Returns (trades_newest_first, total_pl).
+        Best-effort — returns ([], 0.0) if the data isn't available."""
+        try:
+            from alpaca.trading.enums import QueryOrderStatus
+            from alpaca.trading.requests import GetOrdersRequest
+            req = GetOrdersRequest(status=QueryOrderStatus.CLOSED, limit=limit)
+            orders = list(self.trading.get_orders(filter=req) or [])
+        except Exception:
+            return [], 0.0
+        fills = []
+        for o in orders:
+            fq = getattr(o, "filled_qty", None)
+            fp = getattr(o, "filled_avg_price", None)
+            try:
+                q, p = float(fq), float(fp)
+            except (TypeError, ValueError):
+                continue
+            if q <= 0 or p <= 0:
+                continue
+            side = "buy" if "buy" in str(getattr(o, "side", "")).lower() else "sell"
+            when = getattr(o, "filled_at", None) or getattr(o, "submitted_at", None)
+            fills.append({"symbol": getattr(o, "symbol", "?"), "side": side,
+                          "qty": q, "price": p, "when": when})
+        fills.sort(key=lambda f: str(f["when"]))
+        trades, total = fifo_realized(fills)
+        trades.reverse()   # newest first
+        return trades, total
 
     def close_position(self, symbol: str):
         """Flatten a single position at market (sells a long / covers a short)."""
